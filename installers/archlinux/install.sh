@@ -5,7 +5,7 @@ readonly SERVICE_NAME="statix-agent"
 readonly SERVICE_USER="statix-agent"
 readonly SERVICE_GROUP="statix-agent"
 readonly DEFAULT_DOWNLOAD_BASE_URL="https://github.com/statixab/statix-agent/releases/latest/download"
-readonly UPDATE_SCRIPT_ASSET_NAME="statix-agent-update-ubuntu-24.04.sh"
+readonly UPDATE_SCRIPT_ASSET_NAME="statix-agent-update-archlinux.sh"
 
 DOWNLOAD_BASE_URL="${STATIX_DOWNLOAD_BASE_URL:-$DEFAULT_DOWNLOAD_BASE_URL}"
 INSTALL_DIR="${STATIX_INSTALL_DIR:-/usr/local/bin}"
@@ -18,19 +18,10 @@ SERVICE_PATH="${STATIX_SERVICE_PATH:-/etc/systemd/system/$SERVICE_NAME.service}"
 UPDATE_SCRIPT_PATH="${STATIX_UPDATE_SCRIPT_PATH:-/usr/local/lib/statix/update.sh}"
 UPDATE_SERVICE_PATH="${STATIX_UPDATE_SERVICE_PATH:-/etc/systemd/system/$SERVICE_NAME-update.service}"
 SUDOERS_PATH="${STATIX_AGENT_SUDOERS_PATH:-/etc/sudoers.d/$SERVICE_NAME}"
-STATE_DIR="${STATIX_AGENT_STATE_DIR:-/var/lib/statix-agent}"
-LXC_HOME="${STATIX_LXC_HOME:-$STATE_DIR/lxc}"
-LXC_SUBID_START="${STATIX_LXC_SUBID_START:-100000}"
-LXC_SUBID_COUNT="${STATIX_LXC_SUBID_COUNT:-65536}"
-LXC_NETWORK_BRIDGE="${STATIX_LXC_NETWORK_BRIDGE:-lxcbr0}"
-LXC_USERNET_DEVICES="${STATIX_LXC_USERNET_DEVICES:-10}"
 API_BASE_URL="${STATIX_API_BASE_URL:-}"
 NODE_NAME="${STATIX_NODE_NAME:-}"
 SKIP_LOGIN="${STATIX_SKIP_LOGIN:-0}"
 SKIP_START="${STATIX_SKIP_START:-0}"
-MICROVM_IMAGE="${STATIX_MICROVM_IMAGE:-ubuntu-24.04}"
-MICROVM_CPU="${STATIX_MICROVM_CPU:-2}"
-MICROVM_MEMORY_MB="${STATIX_MICROVM_MEMORY_MB:-4096}"
 
 log() {
   printf '[statix-installer] %s\n' "$*"
@@ -49,10 +40,6 @@ require_root() {
 
 require_systemd() {
   command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
-}
-
-require_sudo() {
-  command -v sudo >/dev/null 2>&1 || fail "sudo is required"
 }
 
 normalize_download_base_url() {
@@ -84,44 +71,21 @@ check_platform() {
   # shellcheck disable=SC1091
   . /etc/os-release
 
-  if [[ "${ID:-}" != "ubuntu" ]]; then
-    log "warning: this installer targets Ubuntu 24.04; detected ${PRETTY_NAME:-unknown Linux}"
-    return
-  fi
-
-  if [[ "${VERSION_ID:-}" != "24.04" ]]; then
-    log "warning: this installer is tested on Ubuntu 24.04; detected ${PRETTY_NAME:-Ubuntu}"
-  fi
-}
-
-check_proc_mount_options() {
-  local proc_options
-  proc_options="$(findmnt -no OPTIONS /proc 2>/dev/null || true)"
-
-  if [[ ",$proc_options," == *",noatime,"* ]]; then
-    log "warning: /proc is mounted with noatime; unprivileged LXC may fail to mount proc inside job containers"
-    log "warning: remount /proc with relatime and update /etc/fstab before running container jobs"
+  if [[ "${ID:-}" != "arch" ]]; then
+    log "warning: this installer targets Arch Linux; detected ${PRETTY_NAME:-unknown Linux}"
   fi
 }
 
 install_dependencies() {
-  command -v apt-get >/dev/null 2>&1 || fail "apt-get is required"
+  command -v pacman >/dev/null 2>&1 || fail "pacman is required"
 
-  export DEBIAN_FRONTEND=noninteractive
   log "installing dependencies"
-  apt-get update
-  apt-get install -y --no-install-recommends \
+  pacman -Sy --needed --noconfirm \
     ca-certificates \
     curl \
-    cloud-image-utils \
     iproute2 \
-    lxc \
     pciutils \
-    qemu-system-arm \
-    qemu-system-x86 \
-    qemu-utils \
-    openssh-client \
-    uidmap \
+    sudo \
     wireguard-tools
 }
 
@@ -147,6 +111,18 @@ install_agent_binary() {
   log "installed $BINARY_PATH"
 }
 
+detect_nologin_shell() {
+  if [[ -x "/usr/bin/nologin" ]]; then
+    printf '/usr/bin/nologin'
+    return
+  fi
+  if [[ -x "/usr/sbin/nologin" ]]; then
+    printf '/usr/sbin/nologin'
+    return
+  fi
+  printf '/sbin/nologin'
+}
+
 ensure_service_account() {
   if ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
     log "creating group $SERVICE_GROUP"
@@ -154,91 +130,16 @@ ensure_service_account() {
   fi
 
   if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    local nologin_shell
+    nologin_shell="$(detect_nologin_shell)"
     log "creating user $SERVICE_USER"
     useradd \
       --system \
       --gid "$SERVICE_GROUP" \
       --home-dir /nonexistent \
       --no-create-home \
-      --shell /usr/sbin/nologin \
+      --shell "$nologin_shell" \
       "$SERVICE_USER"
-  fi
-}
-
-has_subid_allocation() {
-  local file="$1"
-
-  [[ -r "$file" ]] || return 1
-  awk -F: -v user="$SERVICE_USER" '$1 == user { found = 1 } END { exit found ? 0 : 1 }' "$file"
-}
-
-subid_value() {
-  local file="$1"
-  local field="$2"
-
-  awk -F: -v user="$SERVICE_USER" -v field="$field" '$1 == user { print $field; exit }' "$file"
-}
-
-ensure_lxc_subids() {
-  local subid_end
-  subid_end=$((LXC_SUBID_START + LXC_SUBID_COUNT - 1))
-
-  if ! has_subid_allocation /etc/subuid; then
-    log "allocating subuids $LXC_SUBID_START-$subid_end for $SERVICE_USER"
-    usermod --add-subuids "$LXC_SUBID_START-$subid_end" "$SERVICE_USER"
-  fi
-
-  if ! has_subid_allocation /etc/subgid; then
-    log "allocating subgids $LXC_SUBID_START-$subid_end for $SERVICE_USER"
-    usermod --add-subgids "$LXC_SUBID_START-$subid_end" "$SERVICE_USER"
-  fi
-}
-
-configure_lxc_runtime() {
-  local lxc_config_dir lxc_config lxc_usernet_line uid_start uid_count gid_start gid_count
-  lxc_config_dir="$LXC_HOME/.config/lxc"
-  lxc_config="$lxc_config_dir/default.conf"
-  lxc_usernet_line="$SERVICE_USER veth $LXC_NETWORK_BRIDGE $LXC_USERNET_DEVICES"
-
-  ensure_lxc_subids
-  uid_start="$(subid_value /etc/subuid 2)"
-  uid_count="$(subid_value /etc/subuid 3)"
-  gid_start="$(subid_value /etc/subgid 2)"
-  gid_count="$(subid_value /etc/subgid 3)"
-
-  [[ -n "$uid_start" && -n "$uid_count" ]] || fail "failed to determine subuid allocation for $SERVICE_USER"
-  [[ -n "$gid_start" && -n "$gid_count" ]] || fail "failed to determine subgid allocation for $SERVICE_USER"
-
-  install -d -m 0711 -o "$SERVICE_USER" -g "$SERVICE_GROUP" \
-    "$STATE_DIR" \
-    "$LXC_HOME" \
-    "$LXC_HOME/containers"
-  install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" \
-    "$LXC_HOME/.cache" \
-    "$LXC_HOME/.local" \
-    "$LXC_HOME/.local/share" \
-    "$lxc_config_dir"
-
-  {
-    if [[ -r /etc/lxc/default.conf ]]; then
-      printf 'lxc.include = /etc/lxc/default.conf\n'
-    else
-      printf 'lxc.net.0.type = veth\n'
-      printf 'lxc.net.0.link = %s\n' "$LXC_NETWORK_BRIDGE"
-      printf 'lxc.net.0.flags = up\n'
-    fi
-    printf 'lxc.idmap = u 0 %s %s\n' "$uid_start" "$uid_count"
-    printf 'lxc.idmap = g 0 %s %s\n' "$gid_start" "$gid_count"
-    printf 'lxc.apparmor.profile = unconfined\n'
-  } >"$lxc_config"
-  chown "$SERVICE_USER:$SERVICE_GROUP" "$lxc_config"
-  chmod 0640 "$lxc_config"
-
-  install -d -m 0755 /etc/lxc
-  touch /etc/lxc/lxc-usernet
-  if ! grep -Fxq "$lxc_usernet_line" /etc/lxc/lxc-usernet; then
-    log "allowing $SERVICE_USER to attach LXC veth devices to $LXC_NETWORK_BRIDGE"
-    printf '%s\n' "$lxc_usernet_line" >>/etc/lxc/lxc-usernet
   fi
 }
 
@@ -304,9 +205,6 @@ write_environment_file() {
     printf 'STATIX_AGENT_CONFIG=%s\n' "$CONFIG_PATH"
     printf 'STATIX_VERSION_FILE=%s\n' "$VERSION_FILE"
     printf 'STATIX_DOWNLOAD_BASE_URL=%s\n' "$DOWNLOAD_BASE_URL"
-    printf 'STATIX_MICROVM_IMAGE=%s\n' "$MICROVM_IMAGE"
-    printf 'STATIX_MICROVM_CPU=%s\n' "$MICROVM_CPU"
-    printf 'STATIX_MICROVM_MEMORY_MB=%s\n' "$MICROVM_MEMORY_MB"
   } >"$ENV_FILE"
 }
 
@@ -315,6 +213,7 @@ set_agent_file_ownership() {
 }
 
 install_update_sudoers() {
+  command -v sudo >/dev/null 2>&1 || fail "sudo is required"
   local temporary
   temporary="$(mktemp)"
 
@@ -359,13 +258,10 @@ start_service() {
 main() {
   require_root
   require_systemd
-  require_sudo
   normalize_download_base_url
   check_platform
-  check_proc_mount_options
   install_dependencies
   ensure_service_account
-  configure_lxc_runtime
   install_agent_binary
   install_version_file
   install_update_script

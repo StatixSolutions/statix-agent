@@ -3,29 +3,37 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_API_BASE_URL: &str = "https://statix.pettersson.online";
+const DEFAULT_API_BASE_URL: &str = "https://statix.se/api";
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub node_id: String,
     pub node_token: String,
     pub agent_ws_url: String,
+    pub api_base_url: String,
     pub publish_interval_ms: u64,
     pub system_info_check_interval_ms: u64,
     pub system_info_republish_interval_ms: u64,
     pub reconnect_delay_ms: u64,
     pub connect_timeout_ms: u64,
     pub wireguard: Option<WireGuardConfig>,
+    pub microvm_default_image: String,
+    pub microvm_default_cpu: u8,
+    pub microvm_default_memory_mb: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedAgentConfig {
+    #[serde(alias = "nodeId")]
     pub node_id: String,
+    #[serde(alias = "nodeToken")]
     pub node_token: String,
+    #[serde(alias = "agentWsUrl")]
     pub agent_ws_url: String,
+    #[serde(default, alias = "apiBaseUrl")]
     pub api_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard: Option<WireGuardConfig>,
@@ -57,7 +65,11 @@ pub struct WireGuardPeerConfig {
     pub endpoint: String,
     #[serde(rename = "allowedIps")]
     pub allowed_ips: Vec<String>,
-    #[serde(rename = "presharedKey", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "presharedKey",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub preshared_key: Option<String>,
     #[serde(
         rename = "persistentKeepaliveSeconds",
@@ -68,19 +80,39 @@ pub struct WireGuardPeerConfig {
 }
 
 impl AgentConfig {
-    pub fn load() -> Option<Self> {
-        let persisted = load_persisted_config().ok().flatten();
+    pub fn load() -> Result<Option<Self>> {
+        let persisted_path = persisted_config_path()?;
+        let persisted_exists = persisted_path.exists();
+        let persisted = load_persisted_config()?;
 
         let node_id = env::var("NODE_ID")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
-            .or_else(|| persisted.as_ref().map(|value| value.node_id.clone()))?;
+            .or_else(|| persisted.as_ref().map(|value| value.node_id.clone()));
+        let Some(node_id) = node_id else {
+            if persisted_exists {
+                bail!(
+                    "Agent identity field `node_id` was not found in {} and NODE_ID is not set.",
+                    persisted_path.display()
+                );
+            }
+            return Ok(None);
+        };
         let node_token = env::var("NODE_TOKEN")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
-            .or_else(|| persisted.as_ref().map(|value| value.node_token.clone()))?;
+            .or_else(|| persisted.as_ref().map(|value| value.node_token.clone()));
+        let Some(node_token) = node_token else {
+            if persisted_exists {
+                bail!(
+                    "Agent identity field `node_token` was not found in {} and NODE_TOKEN is not set.",
+                    persisted_path.display()
+                );
+            }
+            return Ok(None);
+        };
         let agent_ws_url = env::var("AGENT_WS_URL")
             .ok()
             .map(|value| value.trim().to_owned())
@@ -92,18 +124,47 @@ impl AgentConfig {
                     .filter(|value| !value.is_empty())
                     .map(|value| {
                         let ws_path =
-                            env::var("NODE_WS_PATH").unwrap_or_else(|_| "/ws/agent".to_owned());
-                        format!("{}{}", to_ws_base_url(&trim_trailing_slash(&value)), normalize_path(&ws_path))
+                            env::var("NODE_WS_PATH").unwrap_or_else(|_| "/api/ws/agent".to_owned());
+                        format!(
+                            "{}{}",
+                            to_ws_base_url(&trim_trailing_slash(&value)),
+                            normalize_path(&ws_path)
+                        )
                     })
             })
-            .or_else(|| persisted.as_ref().map(|value| value.agent_ws_url.clone()))?;
+            .or_else(|| persisted.as_ref().map(|value| value.agent_ws_url.clone()));
+        let Some(agent_ws_url) = agent_ws_url else {
+            if persisted_exists {
+                bail!(
+                    "Agent identity field `agent_ws_url` was not found in {} and AGENT_WS_URL/API_BASE_URL are not set.",
+                    persisted_path.display()
+                );
+            }
+            return Ok(None);
+        };
+        let api_base_url = normalize_api_base_url(
+            &env::var("API_BASE_URL")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    persisted
+                        .as_ref()
+                        .and_then(|value| value.api_base_url.clone())
+                })
+                .unwrap_or_else(|| api_base_url_from_ws_url(&agent_ws_url)),
+        );
 
-        Some(Self {
+        Ok(Some(Self {
             node_id,
             node_token,
             agent_ws_url,
+            api_base_url,
             publish_interval_ms: parse_positive_int("PUBLISH_INTERVAL_MS", 5_000),
-            system_info_check_interval_ms: parse_positive_int("SYSTEM_INFO_CHECK_INTERVAL_MS", 10 * 60_000),
+            system_info_check_interval_ms: parse_positive_int(
+                "SYSTEM_INFO_CHECK_INTERVAL_MS",
+                10 * 60_000,
+            ),
             system_info_republish_interval_ms: parse_positive_int(
                 "SYSTEM_INFO_REPUBLISH_INTERVAL_MS",
                 24 * 60 * 60_000,
@@ -111,7 +172,14 @@ impl AgentConfig {
             reconnect_delay_ms: parse_positive_int("RECONNECT_DELAY_MS", 3_000),
             connect_timeout_ms: parse_positive_int("WS_CONNECT_TIMEOUT_MS", 8_000),
             wireguard: resolve_wireguard_config(persisted.as_ref()),
-        })
+            microvm_default_image: env::var("STATIX_MICROVM_IMAGE")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "ubuntu-24.04".to_string()),
+            microvm_default_cpu: parse_positive_u8("STATIX_MICROVM_CPU", 2),
+            microvm_default_memory_mb: parse_positive_u32("STATIX_MICROVM_MEMORY_MB", 4096),
+        }))
     }
 }
 
@@ -133,7 +201,8 @@ pub fn load_persisted_config_snapshot() -> Result<Option<PersistedAgentConfig>> 
 pub fn save_persisted_config(config: &PersistedAgentConfig) -> Result<PathBuf> {
     let path = persisted_config_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
     let payload = serde_json::to_string_pretty(config)?;
@@ -142,6 +211,19 @@ pub fn save_persisted_config(config: &PersistedAgentConfig) -> Result<PathBuf> {
 }
 
 pub fn agent_state_dir() -> Result<PathBuf> {
+    if let Some(path) = env_path("STATIX_AGENT_STATE_DIR") {
+        return Ok(path);
+    }
+
+    // systemd services with StateDirectory set expose this variable at runtime.
+    if let Some(path) = env_path("STATE_DIRECTORY") {
+        return Ok(path);
+    }
+
+    if let Some(path) = env_path("XDG_STATE_HOME") {
+        return Ok(path.join("statix"));
+    }
+
     let path = persisted_config_path()?;
     if let Some(parent) = path.parent() {
         return Ok(parent.to_path_buf());
@@ -156,9 +238,10 @@ fn load_persisted_config() -> Result<Option<PersistedAgentConfig>> {
         return Ok(None);
     }
 
-    let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let parsed =
-        serde_json::from_str::<PersistedAgentConfig>(&raw).with_context(|| format!("invalid {}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed = serde_json::from_str::<PersistedAgentConfig>(&raw)
+        .with_context(|| format!("invalid {}", path.display()))?;
     Ok(Some(parsed))
 }
 
@@ -204,6 +287,30 @@ fn parse_positive_int(name: &str, fallback: u64) -> u64 {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(fallback)
+}
+
+fn parse_positive_u8(name: &str, fallback: u8) -> u8 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u8>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
+}
+
+fn parse_positive_u32(name: &str, fallback: u32) -> u32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn resolve_wireguard_config(persisted: Option<&PersistedAgentConfig>) -> Option<WireGuardConfig> {
@@ -274,7 +381,9 @@ fn resolve_wireguard_config(persisted: Option<&PersistedAgentConfig>) -> Option<
             addresses
         };
         let dns = if dns.is_empty() {
-            persisted_wireguard.map(|value| value.dns.clone()).unwrap_or_default()
+            persisted_wireguard
+                .map(|value| value.dns.clone())
+                .unwrap_or_default()
         } else {
             dns
         };
@@ -315,7 +424,12 @@ fn resolve_wireguard_config(persisted: Option<&PersistedAgentConfig>) -> Option<
 fn env_flag(name: &str) -> bool {
     env::var(name)
         .ok()
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -339,6 +453,32 @@ fn trim_trailing_slash(value: &str) -> String {
     value.trim_end_matches('/').to_owned()
 }
 
+fn normalize_api_base_url(value: &str) -> String {
+    let trimmed = trim_trailing_slash(value.trim());
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let Some(_hostname) = extract_hostname(&trimmed) else {
+        return trimmed;
+    };
+
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, remainder)| remainder)
+        .unwrap_or(trimmed.as_str());
+    let path = without_scheme
+        .find('/')
+        .map(|index| &without_scheme[index..])
+        .unwrap_or("");
+
+    if path.is_empty() {
+        return format!("{trimmed}/api");
+    }
+
+    trimmed
+}
+
 fn resolve_login_api_base_url(
     explicit_api_base_url: Option<String>,
     env_api_base_url: Option<String>,
@@ -360,7 +500,7 @@ fn resolve_login_api_base_url(
         })
         .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_owned());
 
-    trim_trailing_slash(&api_base_url)
+    normalize_api_base_url(&api_base_url)
 }
 
 fn is_loopback_like_url(value: &str) -> bool {
@@ -417,6 +557,25 @@ fn to_ws_base_url(value: &str) -> String {
     format!("ws://{value}")
 }
 
+fn api_base_url_from_ws_url(value: &str) -> String {
+    let base = if let Some(suffix) = value.strip_prefix("wss://") {
+        format!("https://{suffix}")
+    } else if let Some(suffix) = value.strip_prefix("ws://") {
+        format!("http://{suffix}")
+    } else {
+        value.to_owned()
+    };
+
+    if let Some(stripped) = base.strip_suffix("/api/ws/agent") {
+        return stripped.to_owned();
+    }
+    if let Some(stripped) = base.strip_suffix("/ws/agent") {
+        return normalize_api_base_url(stripped);
+    }
+
+    normalize_api_base_url(&base)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,7 +603,7 @@ mod tests {
             Some("http://env:3001/".to_owned()),
             Some("http://persisted:3001".to_owned()),
         );
-        assert_eq!(api_base_url, "http://env:3001");
+        assert_eq!(api_base_url, "http://env:3001/api");
     }
 
     #[test]
@@ -464,6 +623,32 @@ mod tests {
             None,
             Some("https://selfhosted.example.com/".to_owned()),
         );
-        assert_eq!(api_base_url, "https://selfhosted.example.com");
+        assert_eq!(api_base_url, "https://selfhosted.example.com/api");
+    }
+
+    #[test]
+    fn resolve_login_config_scopes_hosted_root_url_to_api() {
+        let api_base_url =
+            resolve_login_api_base_url(Some("https://statix.se".to_owned()), None, None);
+        assert_eq!(api_base_url, "https://statix.se/api");
+    }
+
+    #[test]
+    fn normalize_api_base_url_scopes_hosted_subdomain_root_url_to_api() {
+        let api_base_url = normalize_api_base_url("https://dev.statix.se/");
+        assert_eq!(api_base_url, "https://dev.statix.se/api");
+    }
+
+    #[test]
+    fn normalize_api_base_url_keeps_api_path() {
+        let api_base_url = normalize_api_base_url("https://dev.statix.se/api/");
+        assert_eq!(api_base_url, "https://dev.statix.se/api");
+    }
+
+    #[test]
+    fn resolve_login_config_scopes_local_root_url_to_api() {
+        let api_base_url =
+            resolve_login_api_base_url(Some("http://localhost:3001/".to_owned()), None, None);
+        assert_eq!(api_base_url, "http://localhost:3001/api");
     }
 }
