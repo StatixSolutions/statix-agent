@@ -289,9 +289,6 @@ impl LxcContainer {
         timeout_seconds: u64,
         workspace: &PreparedWorkspace,
     ) -> Result<Option<JobExecutionResult>> {
-        if std::env::var("STATIX_LXC_SKIP_GUEST_SETUP").is_ok_and(|value| value == "1") {
-            return Ok(None);
-        }
         let setup_command = concat!(
             "set -e; ",
             "echo '[statix-agent] guest network diagnostics:'; ",
@@ -299,10 +296,17 @@ impl LxcContainer {
             "echo '[statix-agent] ip route:'; ip route || true; ",
             "echo '[statix-agent] /etc/resolv.conf:'; cat /etc/resolv.conf || true; ",
             "command -v apt-get >/dev/null 2>&1 || { echo '[statix-agent] Docker provisioning currently requires an apt-based LXC guest' >&2; exit 1; }; ",
+            "if ! id statix >/dev/null 2>&1; then useradd --create-home --shell /bin/bash statix; fi; ",
+            "install -d -o statix -g statix -m 0755 /home/statix/docker; ",
             "echo '[statix-agent] apt-get update'; apt-get update; ",
             "echo '[statix-agent] installing Docker, Compose, and build dependencies'; ",
             "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 build-essential ca-certificates curl git libssl-dev pkg-config; ",
-            "systemctl enable --now docker; ",
+            // Overlay mounts are not available inside the nested LXC used by the
+            // runner.  vfs keeps Docker fully functional without requiring a
+            // nested overlayfs mount.
+            "install -d /etc/docker; printf '%s\\n' '{\"storage-driver\":\"vfs\"}' > /etc/docker/daemon.json; ",
+            "systemctl enable --now docker; systemctl restart docker; ",
+            "usermod --append --groups docker statix; ",
             "docker info >/dev/null; ",
             "if command -v cargo >/dev/null 2>&1; then ",
             "echo '[statix-agent] cargo already available'; ",
@@ -343,13 +347,24 @@ impl LxcContainer {
             .map(|(key, value)| format!("export {}={};", shell_env_key(key), shell_escape(value)))
             .collect::<Vec<_>>()
             .join(" ");
-        let cwd = command.cwd.as_deref().unwrap_or("/workspace");
+        let cwd = command.cwd.as_deref().unwrap_or("/home/statix/docker");
+        let cwd = if cwd == "/workspace" {
+            "/home/statix/docker"
+        } else {
+            cwd
+        };
+        if !cwd.starts_with("/home/statix/docker") {
+            bail!("container command cwd must be inside /home/statix/docker");
+        }
         let guest_command = format!(
-            "rm -rf /workspace && mkdir -p /workspace && tar -xzf /tmp/{archive} -C /workspace && cd {cwd} && {env} exec {command}",
+            "rm -rf /home/statix/docker && mkdir -p /home/statix/docker && tar -xzf /tmp/{archive} -C /home/statix/docker && chown -R statix:statix /home/statix/docker && su -s /bin/bash - statix -c {user_command}",
             archive = WORKSPACE_ARCHIVE,
-            cwd = shell_escape(cwd),
-            env = env,
-            command = shell_join(&command.argv)
+            user_command = shell_escape(&format!(
+                "cd {} && {} exec {}",
+                shell_escape(cwd),
+                env,
+                shell_join(&command.argv)
+            )),
         );
 
         eprintln!(
@@ -613,7 +628,11 @@ impl Drop for LxcContainer {
 
 fn lxc_command(program: &str) -> TokioCommand {
     let mut command = TokioCommand::new("sudo");
-    command.arg("-n").arg(lxc_helper_path()).arg(program);
+    command
+        .arg("-n")
+        .arg("--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY")
+        .arg(lxc_helper_path())
+        .arg(program);
     if let Some(home) = lxc_process_home() {
         command.env("HOME", &home);
         command.env("XDG_CACHE_HOME", home.join(".cache"));
@@ -626,7 +645,11 @@ fn lxc_command(program: &str) -> TokioCommand {
 
 fn lxc_std_command(program: &str) -> StdCommand {
     let mut command = StdCommand::new("sudo");
-    command.arg("-n").arg(lxc_helper_path()).arg(program);
+    command
+        .arg("-n")
+        .arg("--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY")
+        .arg(lxc_helper_path())
+        .arg(program);
     if let Some(home) = lxc_process_home() {
         command.env("HOME", &home);
         command.env("XDG_CACHE_HOME", home.join(".cache"));
@@ -726,5 +749,5 @@ fn enforce_lxc_limits() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }

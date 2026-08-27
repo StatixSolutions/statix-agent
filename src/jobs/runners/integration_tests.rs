@@ -20,18 +20,16 @@ fn test_root(name: &str) -> PathBuf {
     ))
 }
 
-fn command() -> CommandSpec {
-    let mut env = BTreeMap::new();
-    env.insert(
-        "STATIX_RUNNER_TEST_VALUE".to_string(),
-        "from-runner".to_string(),
-    );
+const TEST_IMAGE: &str = "ghcr.io/statixsolutions/statix-agent/testing-images/8080-ok:latest";
+
+fn compose_command() -> CommandSpec {
     CommandSpec {
         argv: vec![
-            "sh".to_string(), "-c".to_string(),
-            "printf 'stdout:%s:%s' \"$STATIX_RUNNER_TEST_VALUE\" \"$(cat marker)\"; printf 'stderr-line' >&2".to_string(),
+            "bash".to_string(),
+            "-lc".to_string(),
+            "set -eu; test \"$(id -un)\" = statix; test -d /home/statix/docker; test \"$(stat -c %U /home/statix/docker)\" = statix; docker version; docker compose version; docker compose up -d; success=; for attempt in $(seq 1 30); do response=$(curl -fsS http://127.0.0.1:8080 || true); if [ \"$response\" = \"ok: success\" ]; then printf '%s' \"$response\"; success=true; break; fi; sleep 1; done; test \"$success\" = true || { echo \"unexpected response: $response\" >&2; false; }".to_string(),
         ],
-        env,
+        env: BTreeMap::new(),
         cwd: None,
     }
 }
@@ -39,7 +37,11 @@ fn command() -> CommandSpec {
 fn workspace(name: &str) -> (PathBuf, PreparedWorkspace) {
     let root = test_root(name);
     fs::create_dir_all(&root).unwrap();
-    fs::write(root.join("marker"), "workspace").unwrap();
+    fs::write(
+        root.join("compose.yaml"),
+        format!("services:\n  app:\n    image: {TEST_IMAGE}\n    ports:\n      - \"8080:8080\"\n"),
+    )
+    .unwrap();
     (root.clone(), PreparedWorkspace { workdir: root })
 }
 
@@ -76,17 +78,13 @@ async fn lxc_docker_spins_up_executes_and_cleans_up() {
         },
         &context("lxc"),
         &workspace,
-        command(),
+        compose_command(),
     )
     .await
     .unwrap();
     assert_eq!(result.status, "succeeded");
     let message = result.message.unwrap();
-    assert!(
-        message.contains("stdout:from-runner:workspace"),
-        "{message}"
-    );
-    assert!(message.contains("stderr-line"), "{message}");
+    assert!(message.contains("ok: success"), "{message}");
     assert!(!state.join("lxc/containers/statix-attempt-lxc").exists());
     let _ = fs::remove_dir_all(workdir);
     let _ = fs::remove_dir_all(state);
@@ -111,17 +109,13 @@ async fn microvm_spins_up_executes_and_cleans_up() {
         },
         &context("microvm"),
         &workspace,
-        command(),
+        compose_command(),
     )
     .await
     .unwrap();
     assert_eq!(result.status, "succeeded");
     let message = result.message.unwrap();
-    assert!(
-        message.contains("stdout:from-runner:workspace"),
-        "{message}"
-    );
-    assert!(message.contains("stderr-line"), "{message}");
+    assert!(message.contains("ok: success"), "{message}");
     let _ = fs::remove_dir_all(workdir);
     let _ = fs::remove_dir_all(state);
 }

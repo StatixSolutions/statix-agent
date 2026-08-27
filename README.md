@@ -56,7 +56,8 @@ caches a bootable Ubuntu 24.04 qcow2 fixture using Docker. Optionally set
 Container `image` values are LXC distro/release references (for example
 `ubuntu:24.04`); the guest is provisioned with Docker Engine and Docker Compose.
 MicroVMs use `STATIX_MICROVM_BASE_IMAGE` for their bootable qcow2 base
-(default `ubuntu-24.04`) and run the requested Docker image inside the guest.
+(default `ubuntu-24.04`) and run Docker Compose in the guest as `statix`.
+Both runtimes place the project files in `/home/statix/docker`.
 The Docker recipe mounts `/dev/kvm` and runs with the privileges required for
 nested virtualization. Missing images, privileges, or runtime
 dependencies fail the integration target rather than being skipped.

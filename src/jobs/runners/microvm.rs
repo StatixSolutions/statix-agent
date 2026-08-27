@@ -22,11 +22,11 @@ use crate::jobs::{
 
 const DEFAULT_SSH_USER: &str = "statix";
 const DEFAULT_SSH_PORT: u16 = 2222;
+const DEFAULT_DISK_SIZE: &str = "16G";
 const DEFAULT_MEMORY_MB: u32 = 4096;
 const DEFAULT_CPU_COUNT: u8 = 2;
 
 pub struct MicrovmRunner {
-    docker_image: String,
     cpu: Option<u8>,
     memory_mb: Option<u32>,
 }
@@ -34,7 +34,6 @@ pub struct MicrovmRunner {
 pub struct ProjectMicrovmRunner {
     project_id: String,
     environment: String,
-    docker_image: String,
     cpu: Option<u8>,
     memory_mb: Option<u32>,
 }
@@ -101,12 +100,8 @@ impl Drop for QemuProcess {
 }
 
 impl MicrovmRunner {
-    pub fn new(image: String, cpu: Option<u8>, memory_mb: Option<u32>) -> Self {
-        Self {
-            docker_image: image,
-            cpu,
-            memory_mb,
-        }
+    pub fn new(_image: String, cpu: Option<u8>, memory_mb: Option<u32>) -> Self {
+        Self { cpu, memory_mb }
     }
 }
 
@@ -114,14 +109,13 @@ impl ProjectMicrovmRunner {
     pub fn new(
         project_id: String,
         environment: String,
-        image: String,
+        _image: String,
         cpu: Option<u8>,
         memory_mb: Option<u32>,
     ) -> Self {
         Self {
             project_id,
             environment,
-            docker_image: image,
             cpu,
             memory_mb,
         }
@@ -167,6 +161,7 @@ impl Runner for MicrovmRunner {
         );
         let overlay_image = runtime_root.join("disk.qcow2");
         create_overlay_disk(&base_image, &overlay_image).await?;
+        resize_overlay_disk(&overlay_image).await?;
         eprintln!(
             "[statix-agent] job {}: created microvm overlay disk {}",
             ctx.job_id,
@@ -232,9 +227,6 @@ impl Runner for MicrovmRunner {
                     command,
                     workspace,
                     &workspace_tar,
-                    &self.docker_image,
-                    self.cpu.unwrap_or(DEFAULT_CPU_COUNT),
-                    self.memory_mb.unwrap_or(DEFAULT_MEMORY_MB),
                 )
                 .await
             }
@@ -292,6 +284,7 @@ impl Runner for ProjectMicrovmRunner {
         if !overlay_image.exists() {
             create_overlay_disk(&base_image, &overlay_image).await?;
         }
+        resize_overlay_disk(&overlay_image).await?;
 
         let ssh_dir = runtime_root.join("ssh");
         fs::create_dir_all(&ssh_dir)
@@ -335,9 +328,6 @@ impl Runner for ProjectMicrovmRunner {
             command,
             workspace,
             &workspace_tar,
-            &self.docker_image,
-            self.cpu.unwrap_or(DEFAULT_CPU_COUNT),
-            self.memory_mb.unwrap_or(DEFAULT_MEMORY_MB),
         )
         .await;
 
@@ -408,6 +398,21 @@ async fn create_overlay_disk(base_image: &Path, overlay_image: &Path) -> Result<
         bail!("qemu-img failed to create overlay disk");
     }
 
+    Ok(())
+}
+
+async fn resize_overlay_disk(overlay_image: &Path) -> Result<()> {
+    let status = TokioCommand::new("qemu-img")
+        .arg("resize")
+        .arg(overlay_image)
+        .arg(DEFAULT_DISK_SIZE)
+        .status()
+        .await
+        .with_context(|| missing_dependency_message("qemu-img", "qemu-utils"))?;
+
+    if !status.success() {
+        bail!("qemu-img failed to resize the microvm overlay disk");
+    }
     Ok(())
 }
 
@@ -491,8 +496,10 @@ packages:
   - openssh-server
   - pkg-config
 runcmd:
+  - [bash, -lc, "id -u {user} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash {user}"]
   - [systemctl, enable, --now, docker]
   - [usermod, -aG, docker, "{user}"]
+  - [install, -d, -o, "{user}", -g, "{user}", -m, "0755", "/home/{user}/docker"]
   - [su, "-", "{user}", "-c", "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable"]
 "#,
         user = DEFAULT_SSH_USER,
@@ -811,9 +818,6 @@ async fn run_guest_command(
     command: &CommandSpec,
     workspace: &PreparedWorkspace,
     workspace_tar: &Path,
-    docker_image: &str,
-    cpu: u8,
-    memory_mb: u32,
 ) -> Result<JobExecutionResult> {
     eprintln!(
         "[statix-agent] uploading workspace archive to microvm from {}",
@@ -864,29 +868,24 @@ async fn run_guest_command(
         .map(|(key, value)| format!("export {}={};", shell_env_key(key), shell_escape(value)))
         .collect::<Vec<_>>()
         .join(" ");
-    if docker_image.trim().is_empty() {
-        bail!("microvm Docker image must not be empty");
+    let cwd = command.cwd.as_deref().unwrap_or("/home/statix/docker");
+    let cwd = if cwd == "/workspace" {
+        "/home/statix/docker"
+    } else {
+        cwd
+    };
+    if !cwd.starts_with("/home/statix/docker") {
+        bail!("microvm command cwd must be inside /home/statix/docker");
     }
-    let cwd = command.cwd.as_deref().unwrap_or("/workspace");
-    let docker_command = format!(
-        "docker run --rm --init --cpus {cpu} --memory {memory_mb}m --mount type=bind,src=/home/{user}/workspace,dst=/workspace --workdir {cwd} {docker_env} --entrypoint {entrypoint} {image} {args}",
-        user = DEFAULT_SSH_USER,
-        cwd = shell_escape(cwd),
-        docker_env = command
-            .env
-            .iter()
-            .map(|(key, value)| format!("--env {}", shell_escape(&format!("{key}={value}"))))
-            .collect::<Vec<_>>()
-            .join(" "),
-        entrypoint = shell_escape(&command.argv[0]),
-        image = shell_escape(docker_image.trim()),
-        args = shell_join(&command.argv[1..]),
-    );
     let remote_command = format!(
-        "mkdir -p /home/{user}/workspace && rm -rf /home/{user}/workspace/* && tar -xzf /home/{user}/workspace.tar.gz -C /home/{user}/workspace && {env} exec {docker_command}",
+        "set -e; if ! command -v docker >/dev/null 2>&1 || ! sudo docker info >/dev/null 2>&1; then sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 curl; sudo systemctl enable --now docker; fi; sudo usermod --append --groups docker {user}; sudo install -d -o {user} -g {user} -m 0755 /home/{user}/docker; find /home/{user}/docker -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} +; tar -xzf /home/{user}/workspace.tar.gz -C /home/{user}/docker; sudo chown -R {user}:{user} /home/{user}/docker; sg docker -c {user_command}",
         user = DEFAULT_SSH_USER,
-        env = env,
-        docker_command = docker_command,
+        user_command = shell_escape(&format!(
+            "cd {} && {} exec {}",
+            shell_escape(cwd),
+            env,
+            shell_join(&command.argv)
+        )),
     );
 
     eprintln!(

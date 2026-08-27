@@ -1,7 +1,7 @@
 FROM rust:1.88-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cloud-image-utils lxc lxc-templates openssh-client qemu-system-x86 qemu-utils sudo \
+    cloud-image-utils dnsmasq iptables lxc lxc-templates openssh-client qemu-system-x86 qemu-utils sudo \
     ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 

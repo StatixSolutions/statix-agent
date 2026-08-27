@@ -267,6 +267,7 @@ install_update_sudoers() {
   temporary="$(mktemp)"
 
   cat >"$temporary" <<EOF
+Defaults!$LXC_HELPER_PATH env_keep += "STATIX_AGENT_STATE_DIR STATE_DIRECTORY"
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start $SERVICE_NAME-update.service
 $SERVICE_USER ALL=(root) NOPASSWD: $LXC_HELPER_PATH *
 EOF

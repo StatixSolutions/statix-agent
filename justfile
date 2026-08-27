@@ -6,7 +6,7 @@ prepare-microvm-test-image:
 
 test-runners: prepare-microvm-test-image
     docker build -f docker/runner-tests.Dockerfile -t statix-agent-runner-tests .
-    docker run --rm --privileged --device /dev/kvm -e STATIX_MICROVM_TEST_IMAGE=/fixtures/test.qcow2 -v "$PWD:/repo" -v "${STATIX_MICROVM_TEST_IMAGE:-$PWD/.cache/statix-agent/microvm-test.qcow2}:/fixtures/test.qcow2:ro" statix-agent-runner-tests cargo test --all-targets -- --ignored --test-threads=1
+    docker run --rm --privileged --device /dev/kvm -e STATIX_MICROVM_TEST_IMAGE=/fixtures/test.qcow2 -v "$PWD:/repo" -v "${STATIX_MICROVM_TEST_IMAGE:-$PWD/.cache/statix-agent/microvm-test.qcow2}:/fixtures/test.qcow2:ro" statix-agent-runner-tests sh -c 'set -e; ip link add lxcbr0 type bridge || true; ip addr add 10.0.3.1/24 dev lxcbr0 || true; ip link set lxcbr0 up; sysctl -w net.ipv4.ip_forward=1 || true; dnsmasq --interface=lxcbr0 --bind-interfaces --listen-address=10.0.3.1 --dhcp-range=10.0.3.2,10.0.3.254,12h --no-daemon >/tmp/dnsmasq.log 2>&1 & dnsmasq_pid=$!; iptables -t nat -A POSTROUTING -s 10.0.3.0/24 -j MASQUERADE; trap "kill $dnsmasq_pid 2>/dev/null || true" EXIT; cargo test --all-targets -- --ignored --test-threads=1'
 
 test-runners-host: prepare-microvm-test-image
     STATIX_MICROVM_TEST_IMAGE="${STATIX_MICROVM_TEST_IMAGE:-$PWD/.cache/statix-agent/microvm-test.qcow2}" cargo test --all-targets -- --ignored --test-threads=1
