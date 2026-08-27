@@ -18,6 +18,8 @@ SERVICE_PATH="${STATIX_SERVICE_PATH:-/etc/systemd/system/$SERVICE_NAME.service}"
 UPDATE_SCRIPT_PATH="${STATIX_UPDATE_SCRIPT_PATH:-/usr/local/lib/statix/update.sh}"
 UPDATE_SERVICE_PATH="${STATIX_UPDATE_SERVICE_PATH:-/etc/systemd/system/$SERVICE_NAME-update.service}"
 SUDOERS_PATH="${STATIX_AGENT_SUDOERS_PATH:-/etc/sudoers.d/$SERVICE_NAME}"
+LXC_HELPER_PATH="${STATIX_LXC_HELPER_PATH:-/usr/local/libexec/statix-agent-lxc}"
+LXC_HELPER_URL="${STATIX_LXC_HELPER_URL:-$DOWNLOAD_BASE_URL/statix-agent-lxc-helper}"
 API_BASE_URL="${STATIX_API_BASE_URL:-}"
 NODE_NAME="${STATIX_NODE_NAME:-}"
 SKIP_LOGIN="${STATIX_SKIP_LOGIN:-0}"
@@ -84,6 +86,7 @@ install_dependencies() {
     ca-certificates \
     curl \
     iproute2 \
+    lxc \
     pciutils \
     sudo \
     wireguard-tools
@@ -141,6 +144,7 @@ ensure_service_account() {
       --shell "$nologin_shell" \
       "$SERVICE_USER"
   fi
+
 }
 
 install_version_file() {
@@ -157,6 +161,15 @@ install_version_file() {
     log "version file not available at $version_url; continuing"
   fi
 
+  rm -f "$temporary"
+}
+
+install_lxc_helper() {
+  local temporary
+  temporary="$(mktemp)"
+  download_file "$LXC_HELPER_URL" "$temporary" || fail "failed to download LXC helper"
+  install -d -m 0755 "$(dirname "$LXC_HELPER_PATH")"
+  install -o root -g root -m 0755 "$temporary" "$LXC_HELPER_PATH"
   rm -f "$temporary"
 }
 
@@ -219,6 +232,7 @@ install_update_sudoers() {
 
   cat >"$temporary" <<EOF
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start $SERVICE_NAME-update.service
+$SERVICE_USER ALL=(root) NOPASSWD: $LXC_HELPER_PATH *
 EOF
 
   install -d -m 0755 "$(dirname "$SUDOERS_PATH")"
@@ -265,6 +279,7 @@ main() {
   install_agent_binary
   install_version_file
   install_update_script
+  install_lxc_helper
   write_environment_file
   install_service_file
   run_login

@@ -47,13 +47,16 @@ release asset set under `dist/upload/`.
 
 ## Runner integration tests
 
-`just test` runs the fast unit suite. Real LXC and MicroVM tests are available
+`just test` runs the fast unit suite. LXC/Docker-in-LXC and MicroVM tests are available
 through `just test-runners-host` or the Docker-backed `just test-runners`.
 
 If `STATIX_MICROVM_TEST_IMAGE` is not set, the integration target builds and
 caches a bootable Ubuntu 24.04 qcow2 fixture using Docker. Optionally set
-`STATIX_MICROVM_TEST_IMAGE` to use a custom bootable qcow2 cloud image. Also set
-`STATIX_CONTAINER_TEST_IMAGE` to choose the LXC distribution and release (the
-default is `ubuntu:24.04`). The Docker recipe mounts `/dev/kvm` and runs with
-the privileges required for nested LXC. Missing images, privileges, or runtime
+`STATIX_MICROVM_TEST_IMAGE` to use a custom bootable qcow2 cloud image. Runner
+Container `image` values are LXC distro/release references (for example
+`ubuntu:24.04`); the guest is provisioned with Docker Engine and Docker Compose.
+MicroVMs use `STATIX_MICROVM_BASE_IMAGE` for their bootable qcow2 base
+(default `ubuntu-24.04`) and run the requested Docker image inside the guest.
+The Docker recipe mounts `/dev/kvm` and runs with the privileges required for
+nested virtualization. Missing images, privileges, or runtime
 dependencies fail the integration target rather than being skipped.

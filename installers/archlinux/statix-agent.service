@@ -20,20 +20,20 @@ User=statix-agent
 Group=statix-agent
 
 # Run the main agent unprivileged; privileged actions should be delegated to narrow helpers.
-NoNewPrivileges=true
+NoNewPrivileges=false
 PrivateTmp=true
-PrivateDevices=true
+PrivateDevices=false
 ProtectHome=read-only
 ProtectSystem=strict
-ProtectControlGroups=true
-ProtectKernelTunables=true
+ProtectControlGroups=false
+ProtectKernelTunables=false
 ProtectKernelModules=true
 ProtectClock=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
-RestrictNamespaces=true
+RestrictNamespaces=false
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadOnlyPaths=/etc/statix /opt/statix

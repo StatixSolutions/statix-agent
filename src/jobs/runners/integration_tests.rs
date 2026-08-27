@@ -63,10 +63,7 @@ fn context(name: &str) -> ExecutionContext {
 
 #[tokio::test]
 #[ignore = "requires privileged LXC tooling and network access"]
-async fn lxc_spins_up_executes_and_cleans_up() {
-    unsafe {
-        std::env::set_var("STATIX_LXC_SKIP_GUEST_SETUP", "1");
-    }
+async fn lxc_docker_spins_up_executes_and_cleans_up() {
     let state = configure_state("lxc");
     let (workdir, workspace) = workspace("lxc");
     let image =
@@ -96,15 +93,19 @@ async fn lxc_spins_up_executes_and_cleans_up() {
 }
 
 #[tokio::test]
-#[ignore = "requires KVM/QEMU, a bootable qcow2 image, and network access"]
+#[ignore = "requires KVM/QEMU, a bootable qcow2 image, Docker, and network access"]
 async fn microvm_spins_up_executes_and_cleans_up() {
-    let image = std::env::var("STATIX_MICROVM_TEST_IMAGE")
+    let base_image = std::env::var("STATIX_MICROVM_TEST_IMAGE")
         .expect("STATIX_MICROVM_TEST_IMAGE must point to a bootable qcow2 image");
+    unsafe {
+        std::env::set_var("STATIX_MICROVM_BASE_IMAGE", base_image);
+    }
     let state = configure_state("microvm");
     let (workdir, workspace) = workspace("microvm");
     let result = execute_spec(
         &RunnerEnvironment::Microvm {
-            image,
+            image: std::env::var("STATIX_MICROVM_TEST_DOCKER_IMAGE")
+                .unwrap_or_else(|_| "ubuntu:24.04".to_string()),
             cpu: Some(1),
             memory_mb: Some(1024),
         },

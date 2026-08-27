@@ -37,6 +37,7 @@ pub(super) struct LxcContainer {
 impl LxcContainer {
     fn check_dependencies() -> Result<()> {
         let required_cmds = [
+            "sudo",
             "lxc-create",
             "lxc-start",
             "lxc-wait",
@@ -58,6 +59,13 @@ impl LxcContainer {
             bail!(
                 "Missing required LXC dependencies: {}. Please install the 'lxc' package before creating containers.",
                 missing.join(", ")
+            );
+        }
+
+        if !Path::new(lxc_helper_path()).is_file() {
+            bail!(
+                "Missing LXC privilege helper at {}; reinstall statix-agent",
+                lxc_helper_path()
             );
         }
 
@@ -290,16 +298,17 @@ impl LxcContainer {
             "echo '[statix-agent] ip addr:'; ip addr || true; ",
             "echo '[statix-agent] ip route:'; ip route || true; ",
             "echo '[statix-agent] /etc/resolv.conf:'; cat /etc/resolv.conf || true; ",
+            "command -v apt-get >/dev/null 2>&1 || { echo '[statix-agent] Docker provisioning currently requires an apt-based LXC guest' >&2; exit 1; }; ",
+            "echo '[statix-agent] apt-get update'; apt-get update; ",
+            "echo '[statix-agent] installing Docker, Compose, and build dependencies'; ",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 build-essential ca-certificates curl git libssl-dev pkg-config; ",
+            "systemctl enable --now docker; ",
+            "docker info >/dev/null; ",
             "if command -v cargo >/dev/null 2>&1; then ",
             "echo '[statix-agent] cargo already available'; ",
             "else ",
-            "echo '[statix-agent] apt-get update'; ",
-            "apt-get update; ",
-            "echo '[statix-agent] installing build dependencies'; ",
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git libssl-dev pkg-config; ",
             "echo '[statix-agent] installing rust toolchain'; ",
-            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | ",
-            "sh -s -- -y --profile minimal --default-toolchain stable; ",
+            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable; ",
             "fi"
         );
         let output = self
@@ -603,7 +612,8 @@ impl Drop for LxcContainer {
 }
 
 fn lxc_command(program: &str) -> TokioCommand {
-    let mut command = TokioCommand::new(program);
+    let mut command = TokioCommand::new("sudo");
+    command.arg("-n").arg(lxc_helper_path()).arg(program);
     if let Some(home) = lxc_process_home() {
         command.env("HOME", &home);
         command.env("XDG_CACHE_HOME", home.join(".cache"));
@@ -615,7 +625,8 @@ fn lxc_command(program: &str) -> TokioCommand {
 }
 
 fn lxc_std_command(program: &str) -> StdCommand {
-    let mut command = StdCommand::new(program);
+    let mut command = StdCommand::new("sudo");
+    command.arg("-n").arg(lxc_helper_path()).arg(program);
     if let Some(home) = lxc_process_home() {
         command.env("HOME", &home);
         command.env("XDG_CACHE_HOME", home.join(".cache"));
@@ -623,6 +634,10 @@ fn lxc_std_command(program: &str) -> StdCommand {
         command.env("XDG_DATA_HOME", home.join(".local").join("share"));
     }
     command
+}
+
+fn lxc_helper_path() -> &'static str {
+    "/usr/local/libexec/statix-agent-lxc"
 }
 
 fn lxc_process_home() -> Option<PathBuf> {
@@ -693,10 +708,12 @@ fn write_job_lxc_config(
     } else {
         writeln!(
             writer,
-            "# cgroup limits requested by Statix are not written by default because unprivileged LXC startup fails on hosts without a fully delegated writable cgroup subtree."
+            "# cgroup limits requested by Statix are not written because enforcement was disabled."
         )?;
     }
     writeln!(writer, "lxc.apparmor.profile = unconfined")?;
+    writeln!(writer, "lxc.apparmor.allow_nesting = 1")?;
+    writeln!(writer, "lxc.mount.auto = proc:rw sys:rw")?;
     Ok(())
 }
 
@@ -709,5 +726,5 @@ fn enforce_lxc_limits() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }

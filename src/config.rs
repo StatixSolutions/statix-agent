@@ -177,7 +177,7 @@ impl AgentConfig {
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "ubuntu-24.04".to_string()),
+                .unwrap_or_else(|| "ubuntu:24.04".to_string()),
             microvm_default_cpu: parse_positive_u8("STATIX_MICROVM_CPU", 2),
             microvm_default_memory_mb: parse_positive_u32("STATIX_MICROVM_MEMORY_MB", 4096),
             container_default_image: env::var("STATIX_CONTAINER_IMAGE")

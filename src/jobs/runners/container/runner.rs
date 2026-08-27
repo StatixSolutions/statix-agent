@@ -60,21 +60,11 @@ impl Runner for ContainerRunner {
             .with_context(|| format!("failed to create {}", runtime_root.display()))?;
 
         eprintln!(
-            "[statix-agent] job {}: preparing lxc container {} from {}",
+            "[statix-agent] job {}: preparing privileged lxc container {} from {}",
             ctx.job_id, container_name, self.image
         );
-        eprintln!(
-            "[statix-agent] job {}: requested container limits: {} cpu(s), {} MiB memory",
-            ctx.job_id, cpu, memory_mb
-        );
-
         let workspace_tar = runtime_root.join(WORKSPACE_ARCHIVE);
         create_workspace_archive(&workspace_tar, &workspace.workdir).await?;
-        eprintln!(
-            "[statix-agent] job {}: archived workspace {}",
-            ctx.job_id,
-            workspace.workdir.display()
-        );
 
         let mut container = LxcContainer::create(
             container_name.clone(),
@@ -109,7 +99,6 @@ impl Runner for ContainerRunner {
             ctx.job_id, container_name
         );
         container.destroy().await;
-
         result
     }
 }

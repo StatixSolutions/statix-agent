@@ -26,7 +26,7 @@ const DEFAULT_MEMORY_MB: u32 = 4096;
 const DEFAULT_CPU_COUNT: u8 = 2;
 
 pub struct MicrovmRunner {
-    image: String,
+    docker_image: String,
     cpu: Option<u8>,
     memory_mb: Option<u32>,
 }
@@ -34,7 +34,7 @@ pub struct MicrovmRunner {
 pub struct ProjectMicrovmRunner {
     project_id: String,
     environment: String,
-    image: String,
+    docker_image: String,
     cpu: Option<u8>,
     memory_mb: Option<u32>,
 }
@@ -103,7 +103,7 @@ impl Drop for QemuProcess {
 impl MicrovmRunner {
     pub fn new(image: String, cpu: Option<u8>, memory_mb: Option<u32>) -> Self {
         Self {
-            image,
+            docker_image: image,
             cpu,
             memory_mb,
         }
@@ -121,7 +121,7 @@ impl ProjectMicrovmRunner {
         Self {
             project_id,
             environment,
-            image,
+            docker_image: image,
             cpu,
             memory_mb,
         }
@@ -155,7 +155,11 @@ impl Runner for MicrovmRunner {
             runtime_root.display()
         );
 
-        let base_image = resolve_base_image(&self.image, &runtime_root).await?;
+        let base_image = resolve_base_image(
+            &std::env::var("STATIX_MICROVM_BASE_IMAGE").unwrap_or_else(|_| "ubuntu-24.04".into()),
+            &runtime_root,
+        )
+        .await?;
         eprintln!(
             "[statix-agent] job {}: using microvm base image {}",
             ctx.job_id,
@@ -228,6 +232,9 @@ impl Runner for MicrovmRunner {
                     command,
                     workspace,
                     &workspace_tar,
+                    &self.docker_image,
+                    self.cpu.unwrap_or(DEFAULT_CPU_COUNT),
+                    self.memory_mb.unwrap_or(DEFAULT_MEMORY_MB),
                 )
                 .await
             }
@@ -276,7 +283,11 @@ impl Runner for ProjectMicrovmRunner {
             runtime_root.display()
         );
 
-        let base_image = resolve_base_image(&self.image, &runtime_root).await?;
+        let base_image = resolve_base_image(
+            &std::env::var("STATIX_MICROVM_BASE_IMAGE").unwrap_or_else(|_| "ubuntu-24.04".into()),
+            &runtime_root,
+        )
+        .await?;
         let overlay_image = runtime_root.join("disk.qcow2");
         if !overlay_image.exists() {
             create_overlay_disk(&base_image, &overlay_image).await?;
@@ -324,6 +335,9 @@ impl Runner for ProjectMicrovmRunner {
             command,
             workspace,
             &workspace_tar,
+            &self.docker_image,
+            self.cpu.unwrap_or(DEFAULT_CPU_COUNT),
+            self.memory_mb.unwrap_or(DEFAULT_MEMORY_MB),
         )
         .await;
 
@@ -797,6 +811,9 @@ async fn run_guest_command(
     command: &CommandSpec,
     workspace: &PreparedWorkspace,
     workspace_tar: &Path,
+    docker_image: &str,
+    cpu: u8,
+    memory_mb: u32,
 ) -> Result<JobExecutionResult> {
     eprintln!(
         "[statix-agent] uploading workspace archive to microvm from {}",
@@ -847,13 +864,29 @@ async fn run_guest_command(
         .map(|(key, value)| format!("export {}={};", shell_env_key(key), shell_escape(value)))
         .collect::<Vec<_>>()
         .join(" ");
-    let cwd = command.cwd.as_deref().unwrap_or("/home/statix/workspace");
-    let remote_command = format!(
-        "if [ -f /home/{user}/.cargo/env ]; then . /home/{user}/.cargo/env; fi; mkdir -p /home/{user}/workspace && tar -xzf /home/{user}/workspace.tar.gz -C /home/{user}/workspace && cd {cwd} && {env} exec {command}",
+    if docker_image.trim().is_empty() {
+        bail!("microvm Docker image must not be empty");
+    }
+    let cwd = command.cwd.as_deref().unwrap_or("/workspace");
+    let docker_command = format!(
+        "docker run --rm --init --cpus {cpu} --memory {memory_mb}m --mount type=bind,src=/home/{user}/workspace,dst=/workspace --workdir {cwd} {docker_env} --entrypoint {entrypoint} {image} {args}",
         user = DEFAULT_SSH_USER,
         cwd = shell_escape(cwd),
+        docker_env = command
+            .env
+            .iter()
+            .map(|(key, value)| format!("--env {}", shell_escape(&format!("{key}={value}"))))
+            .collect::<Vec<_>>()
+            .join(" "),
+        entrypoint = shell_escape(&command.argv[0]),
+        image = shell_escape(docker_image.trim()),
+        args = shell_join(&command.argv[1..]),
+    );
+    let remote_command = format!(
+        "mkdir -p /home/{user}/workspace && rm -rf /home/{user}/workspace/* && tar -xzf /home/{user}/workspace.tar.gz -C /home/{user}/workspace && {env} exec {docker_command}",
+        user = DEFAULT_SSH_USER,
         env = env,
-        command = shell_join(&command.argv)
+        docker_command = docker_command,
     );
 
     eprintln!(
