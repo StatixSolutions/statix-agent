@@ -16,16 +16,17 @@ use tokio::{
 
 use crate::config::agent_state_dir;
 use crate::jobs::{
-    ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner, summarize_command_output,
+    CommandSpec, ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner,
+    summarize_command_output,
 };
 
 const DEFAULT_SSH_USER: &str = "statix";
 const DEFAULT_SSH_PORT: u16 = 2222;
+const DEFAULT_DISK_SIZE: &str = "16G";
 const DEFAULT_MEMORY_MB: u32 = 4096;
 const DEFAULT_CPU_COUNT: u8 = 2;
 
 pub struct MicrovmRunner {
-    image: String,
     cpu: Option<u8>,
     memory_mb: Option<u32>,
 }
@@ -33,7 +34,6 @@ pub struct MicrovmRunner {
 pub struct ProjectMicrovmRunner {
     project_id: String,
     environment: String,
-    image: String,
     cpu: Option<u8>,
     memory_mb: Option<u32>,
 }
@@ -100,12 +100,8 @@ impl Drop for QemuProcess {
 }
 
 impl MicrovmRunner {
-    pub fn new(image: String, cpu: Option<u8>, memory_mb: Option<u32>) -> Self {
-        Self {
-            image,
-            cpu,
-            memory_mb,
-        }
+    pub fn new(_image: String, cpu: Option<u8>, memory_mb: Option<u32>) -> Self {
+        Self { cpu, memory_mb }
     }
 }
 
@@ -113,14 +109,13 @@ impl ProjectMicrovmRunner {
     pub fn new(
         project_id: String,
         environment: String,
-        image: String,
+        _image: String,
         cpu: Option<u8>,
         memory_mb: Option<u32>,
     ) -> Self {
         Self {
             project_id,
             environment,
-            image,
             cpu,
             memory_mb,
         }
@@ -133,12 +128,12 @@ impl Runner for MicrovmRunner {
         &self,
         ctx: &ExecutionContext,
         workspace: &PreparedWorkspace,
-        command: &[String],
+        command: &CommandSpec,
     ) -> Result<JobExecutionResult> {
         if ctx.timeout_seconds == 0 || ctx.timeout_seconds > 3600 {
             bail!("run timeoutSeconds must be between 1 and 3600");
         }
-        if command.is_empty() {
+        if command.argv.is_empty() {
             bail!("run command must contain at least one token");
         }
 
@@ -154,7 +149,11 @@ impl Runner for MicrovmRunner {
             runtime_root.display()
         );
 
-        let base_image = resolve_base_image(&self.image, &runtime_root).await?;
+        let base_image = resolve_base_image(
+            &std::env::var("STATIX_MICROVM_BASE_IMAGE").unwrap_or_else(|_| "ubuntu-24.04".into()),
+            &runtime_root,
+        )
+        .await?;
         eprintln!(
             "[statix-agent] job {}: using microvm base image {}",
             ctx.job_id,
@@ -162,6 +161,7 @@ impl Runner for MicrovmRunner {
         );
         let overlay_image = runtime_root.join("disk.qcow2");
         create_overlay_disk(&base_image, &overlay_image).await?;
+        resize_overlay_disk(&overlay_image).await?;
         eprintln!(
             "[statix-agent] job {}: created microvm overlay disk {}",
             ctx.job_id,
@@ -252,12 +252,12 @@ impl Runner for ProjectMicrovmRunner {
         &self,
         ctx: &ExecutionContext,
         workspace: &PreparedWorkspace,
-        command: &[String],
+        command: &CommandSpec,
     ) -> Result<JobExecutionResult> {
         if ctx.timeout_seconds == 0 || ctx.timeout_seconds > 3600 {
             bail!("run timeoutSeconds must be between 1 and 3600");
         }
-        if command.is_empty() {
+        if command.argv.is_empty() {
             bail!("run command must contain at least one token");
         }
 
@@ -275,11 +275,16 @@ impl Runner for ProjectMicrovmRunner {
             runtime_root.display()
         );
 
-        let base_image = resolve_base_image(&self.image, &runtime_root).await?;
+        let base_image = resolve_base_image(
+            &std::env::var("STATIX_MICROVM_BASE_IMAGE").unwrap_or_else(|_| "ubuntu-24.04".into()),
+            &runtime_root,
+        )
+        .await?;
         let overlay_image = runtime_root.join("disk.qcow2");
         if !overlay_image.exists() {
             create_overlay_disk(&base_image, &overlay_image).await?;
         }
+        resize_overlay_disk(&overlay_image).await?;
 
         let ssh_dir = runtime_root.join("ssh");
         fs::create_dir_all(&ssh_dir)
@@ -396,6 +401,21 @@ async fn create_overlay_disk(base_image: &Path, overlay_image: &Path) -> Result<
     Ok(())
 }
 
+async fn resize_overlay_disk(overlay_image: &Path) -> Result<()> {
+    let status = TokioCommand::new("qemu-img")
+        .arg("resize")
+        .arg(overlay_image)
+        .arg(DEFAULT_DISK_SIZE)
+        .status()
+        .await
+        .with_context(|| missing_dependency_message("qemu-img", "qemu-utils"))?;
+
+    if !status.success() {
+        bail!("qemu-img failed to resize the microvm overlay disk");
+    }
+    Ok(())
+}
+
 async fn generate_ssh_keypair(private_key: &Path, public_key: &Path) -> Result<()> {
     if private_key.exists() {
         let _ = fs::remove_file(private_key);
@@ -476,8 +496,10 @@ packages:
   - openssh-server
   - pkg-config
 runcmd:
+  - [bash, -lc, "id -u {user} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash {user}"]
   - [systemctl, enable, --now, docker]
   - [usermod, -aG, docker, "{user}"]
+  - [install, -d, -o, "{user}", -g, "{user}", -m, "0755", "/home/{user}/docker"]
   - [su, "-", "{user}", "-c", "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable"]
 "#,
         user = DEFAULT_SSH_USER,
@@ -793,7 +815,7 @@ async fn run_guest_command(
     ssh_port: u16,
     private_key: &Path,
     timeout_seconds: u64,
-    command: &[String],
+    command: &CommandSpec,
     workspace: &PreparedWorkspace,
     workspace_tar: &Path,
 ) -> Result<JobExecutionResult> {
@@ -840,15 +862,35 @@ async fn run_guest_command(
     }
     eprintln!("[statix-agent] uploaded workspace archive to microvm");
 
+    let env = command
+        .env
+        .iter()
+        .map(|(key, value)| format!("export {}={};", shell_env_key(key), shell_escape(value)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cwd = command.cwd.as_deref().unwrap_or("/home/statix/docker");
+    let cwd = if cwd == "/workspace" {
+        "/home/statix/docker"
+    } else {
+        cwd
+    };
+    if !cwd.starts_with("/home/statix/docker") {
+        bail!("microvm command cwd must be inside /home/statix/docker");
+    }
     let remote_command = format!(
-        "if [ -f /home/{user}/.cargo/env ]; then . /home/{user}/.cargo/env; fi; mkdir -p /home/{user}/workspace && tar -xzf /home/{user}/workspace.tar.gz -C /home/{user}/workspace && cd /home/{user}/workspace && exec {command}",
+        "set -e; if ! command -v docker >/dev/null 2>&1 || ! sudo docker info >/dev/null 2>&1; then sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 curl; sudo systemctl enable --now docker; fi; sudo usermod --append --groups docker {user}; sudo install -d -o {user} -g {user} -m 0755 /home/{user}/docker; find /home/{user}/docker -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} +; tar -xzf /home/{user}/workspace.tar.gz -C /home/{user}/docker; sudo chown -R {user}:{user} /home/{user}/docker; sg docker -c {user_command}",
         user = DEFAULT_SSH_USER,
-        command = shell_join(command)
+        user_command = shell_escape(&format!(
+            "cd {} && {} exec {}",
+            shell_escape(cwd),
+            env,
+            shell_join(&command.argv)
+        )),
     );
 
     eprintln!(
         "[statix-agent] running command inside microvm: {}",
-        shell_join(command)
+        shell_join(&command.argv)
     );
     let output = timeout(Duration::from_secs(timeout_seconds), async {
         let mut ssh = TokioCommand::new("ssh");
@@ -857,8 +899,6 @@ async fn run_guest_command(
         ssh.arg("-p")
             .arg(ssh_port.to_string())
             .arg(format!("{}@127.0.0.1", DEFAULT_SSH_USER))
-            .arg("sh")
-            .arg("-lc")
             .arg(remote_command)
             .current_dir(&workspace.workdir);
         ssh.output().await
@@ -948,18 +988,29 @@ fn shell_join(command: &[String]) -> String {
         .join(" ")
 }
 
+fn shell_env_key(key: &str) -> String {
+    if key
+        .chars()
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+    {
+        key.to_owned()
+    } else {
+        "STATIX_INVALID_ENV".to_owned()
+    }
+}
+
 fn shell_escape(value: &str) -> String {
     if value.is_empty() {
-        return "''".to_string();
+        return "''".to_owned();
     }
-
     if value
         .chars()
-        .all(|character| character.is_ascii_alphanumeric() || "@%_-+=:,./".contains(character))
+        .all(|c| c.is_ascii_alphanumeric() || "@%_-+=:,./".contains(c))
     {
-        return value.to_string();
+        return value.to_owned();
     }
-
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

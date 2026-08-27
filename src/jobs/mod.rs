@@ -3,6 +3,7 @@ pub mod runners;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -19,6 +20,81 @@ pub enum RunnerEnvironment {
         cpu: Option<u8>,
         memory_mb: Option<u32>,
     },
+    Container {
+        image: String,
+        cpu: Option<u8>,
+        memory_mb: Option<u32>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandSpec {
+    pub argv: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub cwd: Option<String>,
+}
+
+impl CommandSpec {
+    pub fn new(argv: &[String]) -> Result<Self> {
+        if argv.is_empty() || argv[0].trim().is_empty() {
+            anyhow::bail!("command must contain at least one non-empty token");
+        }
+        Ok(Self {
+            argv: argv.to_vec(),
+            env: BTreeMap::new(),
+            cwd: None,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.argv.is_empty() || self.argv[0].trim().is_empty() {
+            anyhow::bail!("command must contain at least one non-empty token");
+        }
+        for key in self.env.keys() {
+            let mut chars = key.chars();
+            let valid = chars
+                .next()
+                .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+                && chars.all(|c| c == '_' || c.is_ascii_alphanumeric());
+            if !valid {
+                anyhow::bail!("invalid environment variable name: {key}");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CommandSpec;
+
+    #[test]
+    fn command_spec_rejects_empty_argv() {
+        assert!(CommandSpec::new(&[]).is_err());
+        assert!(CommandSpec::new(&[String::new()]).is_err());
+    }
+
+    #[test]
+    fn command_spec_preserves_argv_and_defaults() {
+        let argv = vec![
+            "printf".to_string(),
+            "%s".to_string(),
+            "hello world".to_string(),
+        ];
+        let command = CommandSpec::new(&argv).unwrap();
+        assert_eq!(command.argv, argv);
+        assert!(command.env.is_empty());
+        assert!(command.cwd.is_none());
+    }
+
+    #[test]
+    fn command_spec_rejects_invalid_environment_names() {
+        let mut command = CommandSpec::new(&["true".to_string()]).unwrap();
+        command
+            .env
+            .insert("bad-name".to_string(), "value".to_string());
+        assert!(command.validate().is_err());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +159,16 @@ pub async fn execute(
     workspace: &PreparedWorkspace,
     command: &[String],
 ) -> Result<JobExecutionResult> {
+    execute_spec(environment, ctx, workspace, CommandSpec::new(command)?).await
+}
+
+pub async fn execute_spec(
+    environment: &RunnerEnvironment,
+    ctx: &ExecutionContext,
+    workspace: &PreparedWorkspace,
+    command: CommandSpec,
+) -> Result<JobExecutionResult> {
+    command.validate()?;
     match environment {
         RunnerEnvironment::Microvm {
             image,
@@ -90,7 +176,7 @@ pub async fn execute(
             memory_mb,
         } => {
             runners::microvm::MicrovmRunner::new(image.clone(), *cpu, *memory_mb)
-                .execute(ctx, workspace, command)
+                .execute(ctx, workspace, &command)
                 .await
         }
         RunnerEnvironment::ProjectMicrovm {
@@ -107,8 +193,17 @@ pub async fn execute(
                 *cpu,
                 *memory_mb,
             )
-            .execute(ctx, workspace, command)
+            .execute(ctx, workspace, &command)
             .await
+        }
+        RunnerEnvironment::Container {
+            image,
+            cpu,
+            memory_mb,
+        } => {
+            runners::container::ContainerRunner::new(image.clone(), *cpu, *memory_mb)
+                .execute(ctx, workspace, &command)
+                .await
         }
     }
 }
@@ -119,7 +214,7 @@ pub(crate) trait Runner {
         &self,
         ctx: &ExecutionContext,
         workspace: &PreparedWorkspace,
-        command: &[String],
+        command: &CommandSpec,
     ) -> Result<JobExecutionResult>;
 }
 

@@ -13,7 +13,8 @@ use tokio::{
 };
 
 use crate::jobs::{
-    ExecutionContext, JobExecutionResult, JobLogStream, PreparedWorkspace, summarize_command_output,
+    CommandSpec, ExecutionContext, JobExecutionResult, JobLogStream, PreparedWorkspace,
+    summarize_command_output,
 };
 
 use super::{
@@ -25,7 +26,7 @@ use super::{
     dns::{container_dns_config, guest_resolv_conf_command},
     image::lxc_arch,
     network::{guest_ipv4_address, guest_network_command, lxc_bridge_network},
-    shell::{shell_join, truncate_for_log},
+    shell::{shell_escape, shell_join, truncate_for_log},
 };
 
 pub(super) struct LxcContainer {
@@ -36,6 +37,7 @@ pub(super) struct LxcContainer {
 impl LxcContainer {
     fn check_dependencies() -> Result<()> {
         let required_cmds = [
+            "sudo",
             "lxc-create",
             "lxc-start",
             "lxc-wait",
@@ -57,6 +59,13 @@ impl LxcContainer {
             bail!(
                 "Missing required LXC dependencies: {}. Please install the 'lxc' package before creating containers.",
                 missing.join(", ")
+            );
+        }
+
+        if !Path::new(lxc_helper_path()).is_file() {
+            bail!(
+                "Missing LXC privilege helper at {}; reinstall statix-agent",
+                lxc_helper_path()
             );
         }
 
@@ -113,6 +122,9 @@ impl LxcContainer {
             destroyed: false,
         };
         container.apply_job_config(cpu, memory_mb, enforce_lxc_limits())?;
+        if lxc_bridge_network().is_none() {
+            container.append_networkless_config()?;
+        }
         Ok(container)
     }
 
@@ -283,16 +295,24 @@ impl LxcContainer {
             "echo '[statix-agent] ip addr:'; ip addr || true; ",
             "echo '[statix-agent] ip route:'; ip route || true; ",
             "echo '[statix-agent] /etc/resolv.conf:'; cat /etc/resolv.conf || true; ",
+            "command -v apt-get >/dev/null 2>&1 || { echo '[statix-agent] Docker provisioning currently requires an apt-based LXC guest' >&2; exit 1; }; ",
+            "if ! id statix >/dev/null 2>&1; then useradd --create-home --shell /bin/bash statix; fi; ",
+            "install -d -o statix -g statix -m 0755 /home/statix/docker; ",
+            "echo '[statix-agent] apt-get update'; apt-get update; ",
+            "echo '[statix-agent] installing Docker, Compose, and build dependencies'; ",
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 build-essential ca-certificates curl git libssl-dev pkg-config; ",
+            // Overlay mounts are not available inside the nested LXC used by the
+            // runner.  vfs keeps Docker fully functional without requiring a
+            // nested overlayfs mount.
+            "install -d /etc/docker; printf '%s\\n' '{\"storage-driver\":\"vfs\"}' > /etc/docker/daemon.json; ",
+            "systemctl enable --now docker; systemctl restart docker; ",
+            "usermod --append --groups docker statix; ",
+            "docker info >/dev/null; ",
             "if command -v cargo >/dev/null 2>&1; then ",
             "echo '[statix-agent] cargo already available'; ",
             "else ",
-            "echo '[statix-agent] apt-get update'; ",
-            "apt-get update; ",
-            "echo '[statix-agent] installing build dependencies'; ",
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git libssl-dev pkg-config; ",
             "echo '[statix-agent] installing rust toolchain'; ",
-            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | ",
-            "sh -s -- -y --profile minimal --default-toolchain stable; ",
+            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable; ",
             "fi"
         );
         let output = self
@@ -318,19 +338,39 @@ impl LxcContainer {
         &self,
         ctx: &ExecutionContext,
         timeout_seconds: u64,
-        command: &[String],
+        command: &CommandSpec,
         workspace: &PreparedWorkspace,
     ) -> Result<JobExecutionResult> {
+        let env = command
+            .env
+            .iter()
+            .map(|(key, value)| format!("export {}={};", shell_env_key(key), shell_escape(value)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cwd = command.cwd.as_deref().unwrap_or("/home/statix/docker");
+        let cwd = if cwd == "/workspace" {
+            "/home/statix/docker"
+        } else {
+            cwd
+        };
+        if !cwd.starts_with("/home/statix/docker") {
+            bail!("container command cwd must be inside /home/statix/docker");
+        }
         let guest_command = format!(
-            "rm -rf /workspace && mkdir -p /workspace && tar -xzf /tmp/{archive} -C /workspace && cd /workspace && exec {command}",
+            "rm -rf /home/statix/docker && mkdir -p /home/statix/docker && tar -xzf /tmp/{archive} -C /home/statix/docker && chown -R statix:statix /home/statix/docker && su -s /bin/bash - statix -c {user_command}",
             archive = WORKSPACE_ARCHIVE,
-            command = shell_join(command)
+            user_command = shell_escape(&format!(
+                "cd {} && {} exec {}",
+                shell_escape(cwd),
+                env,
+                shell_join(&command.argv)
+            )),
         );
 
         eprintln!(
             "[statix-agent] running command inside lxc container {}: {}",
             self.name,
-            shell_join(command)
+            shell_join(&command.argv)
         );
         let output = self
             .attach_output(timeout_seconds, &guest_command, Some(ctx))
@@ -339,9 +379,10 @@ impl LxcContainer {
             eprintln!("[statix-agent] lxc container command succeeded");
             Ok(JobExecutionResult {
                 status: "succeeded",
-                message: Some(format!(
-                    "{}: command completed successfully",
-                    workspace.workdir.display()
+                message: Some(summarize_command_output(
+                    &workspace.workdir,
+                    &output.stdout,
+                    &output.stderr,
                 )),
             })
         } else {
@@ -490,6 +531,16 @@ impl LxcContainer {
         write_job_lxc_config(&mut config, cpu, memory_mb, enforce_limits)?;
         Ok(())
     }
+
+    fn append_networkless_config(&self) -> Result<()> {
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(self.config_path())
+            .with_context(|| format!("failed to open lxc config for {}", self.name))?;
+        writeln!(config, "\n# Statix fallback when lxcbr0 is unavailable")?;
+        writeln!(config, "lxc.net.0.type = empty")?;
+        Ok(())
+    }
 }
 
 async fn stream_and_collect_output(
@@ -551,6 +602,19 @@ fn emit_stream_segment(
     }
 }
 
+fn shell_env_key(key: &str) -> String {
+    if key
+        .chars()
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+    {
+        key.to_owned()
+    } else {
+        "STATIX_INVALID_ENV".to_owned()
+    }
+}
+
 impl Drop for LxcContainer {
     fn drop(&mut self) {
         if !self.destroyed {
@@ -563,7 +627,12 @@ impl Drop for LxcContainer {
 }
 
 fn lxc_command(program: &str) -> TokioCommand {
-    let mut command = TokioCommand::new(program);
+    let mut command = TokioCommand::new("sudo");
+    command
+        .arg("-n")
+        .arg("--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY")
+        .arg(lxc_helper_path())
+        .arg(program);
     if let Some(home) = lxc_process_home() {
         command.env("HOME", &home);
         command.env("XDG_CACHE_HOME", home.join(".cache"));
@@ -575,7 +644,12 @@ fn lxc_command(program: &str) -> TokioCommand {
 }
 
 fn lxc_std_command(program: &str) -> StdCommand {
-    let mut command = StdCommand::new(program);
+    let mut command = StdCommand::new("sudo");
+    command
+        .arg("-n")
+        .arg("--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY")
+        .arg(lxc_helper_path())
+        .arg(program);
     if let Some(home) = lxc_process_home() {
         command.env("HOME", &home);
         command.env("XDG_CACHE_HOME", home.join(".cache"));
@@ -583,6 +657,10 @@ fn lxc_std_command(program: &str) -> StdCommand {
         command.env("XDG_DATA_HOME", home.join(".local").join("share"));
     }
     command
+}
+
+fn lxc_helper_path() -> &'static str {
+    "/usr/local/libexec/statix-agent-lxc"
 }
 
 fn lxc_process_home() -> Option<PathBuf> {
@@ -653,10 +731,12 @@ fn write_job_lxc_config(
     } else {
         writeln!(
             writer,
-            "# cgroup limits requested by Statix are not written by default because unprivileged LXC startup fails on hosts without a fully delegated writable cgroup subtree."
+            "# cgroup limits requested by Statix are not written because enforcement was disabled."
         )?;
     }
     writeln!(writer, "lxc.apparmor.profile = unconfined")?;
+    writeln!(writer, "lxc.apparmor.allow_nesting = 1")?;
+    writeln!(writer, "lxc.mount.auto = proc:rw sys:rw")?;
     Ok(())
 }
 

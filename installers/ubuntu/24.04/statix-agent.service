@@ -20,25 +20,17 @@ TimeoutStopSec=20s
 User=statix-agent
 Group=statix-agent
 
-# LXC jobs run as unprivileged containers, but LXC still needs namespace
-# creation, writable delegated cgroups, and the setuid uidmap helpers for the
-# configured subordinate IDs.
+# The agent uses a narrow root helper for privileged Docker-in-LXC jobs and
+# QEMU/KVM for microVM jobs.
 NoNewPrivileges=false
 Delegate=yes
 PrivateTmp=true
 PrivateDevices=false
 ProtectHome=read-only
 ProtectSystem=strict
-# Ubuntu's LXC package uses this multiarch package directory as a temporary
-# rootfs mountpoint while starting containers. Keep it writable even though the
-# rest of /usr is read-only in the service mount namespace.
-ReadWritePaths=-/usr/lib/x86_64-linux-gnu/lxc/rootfs -/usr/lib/aarch64-linux-gnu/lxc/rootfs
-# lxc-user-nic serializes unprivileged veth allocation with /run/lxc/nics.
-ReadWritePaths=/run/lxc
+# LXC needs these paths writable while creating and mounting guests.
+ReadWritePaths=/run/lxc -/usr/lib/x86_64-linux-gnu/lxc/rootfs -/usr/lib/aarch64-linux-gnu/lxc/rootfs
 ProtectControlGroups=false
-# LXC must mount procfs/sysfs for job containers. Making kernel tunables
-# read-only in the agent's own mount namespace can make the container's procfs
-# mount look less restrictive and fail with EPERM.
 ProtectKernelTunables=false
 ProtectKernelModules=true
 ProtectClock=true

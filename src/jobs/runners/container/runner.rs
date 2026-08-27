@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     config::agent_state_dir,
-    jobs::{ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner},
+    jobs::{CommandSpec, ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner},
 };
 
 use super::{
@@ -39,12 +39,12 @@ impl Runner for ContainerRunner {
         &self,
         ctx: &ExecutionContext,
         workspace: &PreparedWorkspace,
-        command: &[String],
+        command: &CommandSpec,
     ) -> Result<JobExecutionResult> {
         if ctx.timeout_seconds == 0 || ctx.timeout_seconds > 3600 {
             bail!("run timeoutSeconds must be between 1 and 3600");
         }
-        if command.is_empty() {
+        if command.argv.is_empty() {
             bail!("run command must contain at least one token");
         }
 
@@ -60,21 +60,11 @@ impl Runner for ContainerRunner {
             .with_context(|| format!("failed to create {}", runtime_root.display()))?;
 
         eprintln!(
-            "[statix-agent] job {}: preparing lxc container {} from {}",
+            "[statix-agent] job {}: preparing privileged lxc container {} from {}",
             ctx.job_id, container_name, self.image
         );
-        eprintln!(
-            "[statix-agent] job {}: requested container limits: {} cpu(s), {} MiB memory",
-            ctx.job_id, cpu, memory_mb
-        );
-
         let workspace_tar = runtime_root.join(WORKSPACE_ARCHIVE);
         create_workspace_archive(&workspace_tar, &workspace.workdir).await?;
-        eprintln!(
-            "[statix-agent] job {}: archived workspace {}",
-            ctx.job_id,
-            workspace.workdir.display()
-        );
 
         let mut container = LxcContainer::create(
             container_name.clone(),
@@ -109,7 +99,6 @@ impl Runner for ContainerRunner {
             ctx.job_id, container_name
         );
         container.destroy().await;
-
         result
     }
 }
