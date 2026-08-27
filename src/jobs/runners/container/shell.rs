@@ -32,7 +32,7 @@ pub(super) fn shell_join(command: &[String]) -> String {
         .join(" ")
 }
 
-fn shell_escape(value: &str) -> String {
+pub(super) fn shell_escape(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
     }

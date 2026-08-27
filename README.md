@@ -44,3 +44,16 @@ bash scripts/build-release.sh all
 
 This stages structured output under `dist/release/` and writes the flat GitHub
 release asset set under `dist/upload/`.
+
+## Runner integration tests
+
+`just test` runs the fast unit suite. Real LXC and MicroVM tests are available
+through `just test-runners-host` or the Docker-backed `just test-runners`.
+
+If `STATIX_MICROVM_TEST_IMAGE` is not set, the integration target builds and
+caches a bootable Ubuntu 24.04 qcow2 fixture using Docker. Optionally set
+`STATIX_MICROVM_TEST_IMAGE` to use a custom bootable qcow2 cloud image. Also set
+`STATIX_CONTAINER_TEST_IMAGE` to choose the LXC distribution and release (the
+default is `ubuntu:24.04`). The Docker recipe mounts `/dev/kvm` and runs with
+the privileges required for nested LXC. Missing images, privileges, or runtime
+dependencies fail the integration target rather than being skipped.

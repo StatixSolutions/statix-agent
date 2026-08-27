@@ -13,7 +13,8 @@ use tokio::{
 };
 
 use crate::jobs::{
-    ExecutionContext, JobExecutionResult, JobLogStream, PreparedWorkspace, summarize_command_output,
+    CommandSpec, ExecutionContext, JobExecutionResult, JobLogStream, PreparedWorkspace,
+    summarize_command_output,
 };
 
 use super::{
@@ -25,7 +26,7 @@ use super::{
     dns::{container_dns_config, guest_resolv_conf_command},
     image::lxc_arch,
     network::{guest_ipv4_address, guest_network_command, lxc_bridge_network},
-    shell::{shell_join, truncate_for_log},
+    shell::{shell_escape, shell_join, truncate_for_log},
 };
 
 pub(super) struct LxcContainer {
@@ -113,6 +114,9 @@ impl LxcContainer {
             destroyed: false,
         };
         container.apply_job_config(cpu, memory_mb, enforce_lxc_limits())?;
+        if lxc_bridge_network().is_none() {
+            container.append_networkless_config()?;
+        }
         Ok(container)
     }
 
@@ -277,6 +281,9 @@ impl LxcContainer {
         timeout_seconds: u64,
         workspace: &PreparedWorkspace,
     ) -> Result<Option<JobExecutionResult>> {
+        if std::env::var("STATIX_LXC_SKIP_GUEST_SETUP").is_ok_and(|value| value == "1") {
+            return Ok(None);
+        }
         let setup_command = concat!(
             "set -e; ",
             "echo '[statix-agent] guest network diagnostics:'; ",
@@ -318,19 +325,28 @@ impl LxcContainer {
         &self,
         ctx: &ExecutionContext,
         timeout_seconds: u64,
-        command: &[String],
+        command: &CommandSpec,
         workspace: &PreparedWorkspace,
     ) -> Result<JobExecutionResult> {
+        let env = command
+            .env
+            .iter()
+            .map(|(key, value)| format!("export {}={};", shell_env_key(key), shell_escape(value)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cwd = command.cwd.as_deref().unwrap_or("/workspace");
         let guest_command = format!(
-            "rm -rf /workspace && mkdir -p /workspace && tar -xzf /tmp/{archive} -C /workspace && cd /workspace && exec {command}",
+            "rm -rf /workspace && mkdir -p /workspace && tar -xzf /tmp/{archive} -C /workspace && cd {cwd} && {env} exec {command}",
             archive = WORKSPACE_ARCHIVE,
-            command = shell_join(command)
+            cwd = shell_escape(cwd),
+            env = env,
+            command = shell_join(&command.argv)
         );
 
         eprintln!(
             "[statix-agent] running command inside lxc container {}: {}",
             self.name,
-            shell_join(command)
+            shell_join(&command.argv)
         );
         let output = self
             .attach_output(timeout_seconds, &guest_command, Some(ctx))
@@ -339,9 +355,10 @@ impl LxcContainer {
             eprintln!("[statix-agent] lxc container command succeeded");
             Ok(JobExecutionResult {
                 status: "succeeded",
-                message: Some(format!(
-                    "{}: command completed successfully",
-                    workspace.workdir.display()
+                message: Some(summarize_command_output(
+                    &workspace.workdir,
+                    &output.stdout,
+                    &output.stderr,
                 )),
             })
         } else {
@@ -490,6 +507,16 @@ impl LxcContainer {
         write_job_lxc_config(&mut config, cpu, memory_mb, enforce_limits)?;
         Ok(())
     }
+
+    fn append_networkless_config(&self) -> Result<()> {
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(self.config_path())
+            .with_context(|| format!("failed to open lxc config for {}", self.name))?;
+        writeln!(config, "\n# Statix fallback when lxcbr0 is unavailable")?;
+        writeln!(config, "lxc.net.0.type = empty")?;
+        Ok(())
+    }
 }
 
 async fn stream_and_collect_output(
@@ -548,6 +575,19 @@ fn emit_stream_segment(
     );
     if let Some(ctx) = ctx {
         ctx.emit_log(stream_name, message.into_owned());
+    }
+}
+
+fn shell_env_key(key: &str) -> String {
+    if key
+        .chars()
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+    {
+        key.to_owned()
+    } else {
+        "STATIX_INVALID_ENV".to_owned()
     }
 }
 

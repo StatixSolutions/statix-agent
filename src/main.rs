@@ -107,6 +107,14 @@ enum JobEnvironment {
         #[serde(rename = "memoryMb", default)]
         memory_mb: Option<u32>,
     },
+    Container {
+        #[serde(default)]
+        image: Option<String>,
+        #[serde(default)]
+        cpu: Option<u8>,
+        #[serde(rename = "memoryMb", default)]
+        memory_mb: Option<u32>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -765,6 +773,15 @@ async fn execute_job(
                     cpu: cpu.or(Some(config.microvm_default_cpu)),
                     memory_mb: memory_mb.or(Some(config.microvm_default_memory_mb)),
                 },
+                Some(JobEnvironment::Container {
+                    image,
+                    cpu,
+                    memory_mb,
+                }) => RunnerEnvironment::Container {
+                    image: image.unwrap_or_else(|| config.container_default_image.clone()),
+                    cpu,
+                    memory_mb,
+                },
                 None => RunnerEnvironment::Microvm {
                     image: config.microvm_default_image.clone(),
                     cpu: Some(config.microvm_default_cpu),
@@ -820,6 +837,15 @@ async fn execute_job(
                     image: image.unwrap_or_else(|| config.microvm_default_image.clone()),
                     cpu: cpu.or(Some(config.microvm_default_cpu)),
                     memory_mb: memory_mb.or(Some(config.microvm_default_memory_mb)),
+                },
+                Some(JobEnvironment::Container {
+                    image,
+                    cpu,
+                    memory_mb,
+                }) => RunnerEnvironment::Container {
+                    image: image.unwrap_or_else(|| config.container_default_image.clone()),
+                    cpu,
+                    memory_mb,
                 },
                 None => RunnerEnvironment::ProjectMicrovm {
                     project_id: project_id.clone(),
@@ -966,6 +992,7 @@ fn runner_environment_label(environment: &RunnerEnvironment) -> &'static str {
     match environment {
         RunnerEnvironment::Microvm { .. } => "microvm",
         RunnerEnvironment::ProjectMicrovm { .. } => "project microvm",
+        RunnerEnvironment::Container { .. } => "container",
     }
 }
 

@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::{process::Command as TokioCommand, time::Duration};
 
 use crate::jobs::{
-    ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner, summarize_command_output,
+    CommandSpec, ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner, summarize_command_output,
 };
 
 pub struct HostRunner;
@@ -13,18 +13,17 @@ impl Runner for HostRunner {
         &self,
         ctx: &ExecutionContext,
         workspace: &PreparedWorkspace,
-        command: &[String],
+        command: &CommandSpec,
     ) -> Result<JobExecutionResult> {
         if ctx.timeout_seconds == 0 || ctx.timeout_seconds > 3600 {
             bail!("run timeoutSeconds must be between 1 and 3600");
         }
-        if command.is_empty() {
-            bail!("run command must contain at least one token");
-        }
+        if command.argv.is_empty() { bail!("run command must contain at least one token"); }
 
-        let mut process = TokioCommand::new(&command[0]);
-        process.args(&command[1..]);
-        process.current_dir(&workspace.workdir);
+        let mut process = TokioCommand::new(&command.argv[0]);
+        process.args(&command.argv[1..]);
+        process.current_dir(command.cwd.as_deref().unwrap_or(workspace.workdir.to_str().unwrap_or(".")));
+        process.envs(&command.env);
         process.kill_on_drop(true);
 
         let output =
@@ -35,7 +34,7 @@ impl Runner for HostRunner {
                 .map_err(|error| {
                     error.context(format!(
                         "failed to run {} in {} for attempt {}",
-                        command[0],
+                        command.argv[0],
                         workspace.workdir.display(),
                         ctx.attempt_id
                     ))

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     config::agent_state_dir,
-    jobs::{ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner},
+    jobs::{CommandSpec, ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner},
 };
 
 use super::{
@@ -39,12 +39,12 @@ impl Runner for ContainerRunner {
         &self,
         ctx: &ExecutionContext,
         workspace: &PreparedWorkspace,
-        command: &[String],
+        command: &CommandSpec,
     ) -> Result<JobExecutionResult> {
         if ctx.timeout_seconds == 0 || ctx.timeout_seconds > 3600 {
             bail!("run timeoutSeconds must be between 1 and 3600");
         }
-        if command.is_empty() {
+        if command.argv.is_empty() {
             bail!("run command must contain at least one token");
         }
 

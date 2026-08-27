@@ -16,7 +16,8 @@ use tokio::{
 
 use crate::config::agent_state_dir;
 use crate::jobs::{
-    ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner, summarize_command_output,
+    CommandSpec, ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner,
+    summarize_command_output,
 };
 
 const DEFAULT_SSH_USER: &str = "statix";
@@ -133,12 +134,12 @@ impl Runner for MicrovmRunner {
         &self,
         ctx: &ExecutionContext,
         workspace: &PreparedWorkspace,
-        command: &[String],
+        command: &CommandSpec,
     ) -> Result<JobExecutionResult> {
         if ctx.timeout_seconds == 0 || ctx.timeout_seconds > 3600 {
             bail!("run timeoutSeconds must be between 1 and 3600");
         }
-        if command.is_empty() {
+        if command.argv.is_empty() {
             bail!("run command must contain at least one token");
         }
 
@@ -252,12 +253,12 @@ impl Runner for ProjectMicrovmRunner {
         &self,
         ctx: &ExecutionContext,
         workspace: &PreparedWorkspace,
-        command: &[String],
+        command: &CommandSpec,
     ) -> Result<JobExecutionResult> {
         if ctx.timeout_seconds == 0 || ctx.timeout_seconds > 3600 {
             bail!("run timeoutSeconds must be between 1 and 3600");
         }
-        if command.is_empty() {
+        if command.argv.is_empty() {
             bail!("run command must contain at least one token");
         }
 
@@ -793,7 +794,7 @@ async fn run_guest_command(
     ssh_port: u16,
     private_key: &Path,
     timeout_seconds: u64,
-    command: &[String],
+    command: &CommandSpec,
     workspace: &PreparedWorkspace,
     workspace_tar: &Path,
 ) -> Result<JobExecutionResult> {
@@ -840,15 +841,24 @@ async fn run_guest_command(
     }
     eprintln!("[statix-agent] uploaded workspace archive to microvm");
 
+    let env = command
+        .env
+        .iter()
+        .map(|(key, value)| format!("export {}={};", shell_env_key(key), shell_escape(value)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cwd = command.cwd.as_deref().unwrap_or("/home/statix/workspace");
     let remote_command = format!(
-        "if [ -f /home/{user}/.cargo/env ]; then . /home/{user}/.cargo/env; fi; mkdir -p /home/{user}/workspace && tar -xzf /home/{user}/workspace.tar.gz -C /home/{user}/workspace && cd /home/{user}/workspace && exec {command}",
+        "if [ -f /home/{user}/.cargo/env ]; then . /home/{user}/.cargo/env; fi; mkdir -p /home/{user}/workspace && tar -xzf /home/{user}/workspace.tar.gz -C /home/{user}/workspace && cd {cwd} && {env} exec {command}",
         user = DEFAULT_SSH_USER,
-        command = shell_join(command)
+        cwd = shell_escape(cwd),
+        env = env,
+        command = shell_join(&command.argv)
     );
 
     eprintln!(
         "[statix-agent] running command inside microvm: {}",
-        shell_join(command)
+        shell_join(&command.argv)
     );
     let output = timeout(Duration::from_secs(timeout_seconds), async {
         let mut ssh = TokioCommand::new("ssh");
@@ -857,8 +867,6 @@ async fn run_guest_command(
         ssh.arg("-p")
             .arg(ssh_port.to_string())
             .arg(format!("{}@127.0.0.1", DEFAULT_SSH_USER))
-            .arg("sh")
-            .arg("-lc")
             .arg(remote_command)
             .current_dir(&workspace.workdir);
         ssh.output().await
@@ -948,18 +956,29 @@ fn shell_join(command: &[String]) -> String {
         .join(" ")
 }
 
+fn shell_env_key(key: &str) -> String {
+    if key
+        .chars()
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+    {
+        key.to_owned()
+    } else {
+        "STATIX_INVALID_ENV".to_owned()
+    }
+}
+
 fn shell_escape(value: &str) -> String {
     if value.is_empty() {
-        return "''".to_string();
+        return "''".to_owned();
     }
-
     if value
         .chars()
-        .all(|character| character.is_ascii_alphanumeric() || "@%_-+=:,./".contains(character))
+        .all(|c| c.is_ascii_alphanumeric() || "@%_-+=:,./".contains(c))
     {
-        return value.to_string();
+        return value.to_owned();
     }
-
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
