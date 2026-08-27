@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 readonly SERVICE_NAME="statix-agent"
-readonly DEFAULT_DOWNLOAD_BASE_URL="https://github.com/statixab/statix-agent/releases/latest/download"
+readonly DEFAULT_DOWNLOAD_BASE_URL="https://github.com/StatixSolutions/statix-agent/releases/latest/download"
 
 DOWNLOAD_BASE_URL="${STATIX_DOWNLOAD_BASE_URL:-$DEFAULT_DOWNLOAD_BASE_URL}"
 BINARY_PATH="${STATIX_BINARY_PATH:-/usr/local/bin/statix-agent}"

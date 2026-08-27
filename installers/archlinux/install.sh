@@ -4,7 +4,7 @@ set -Eeuo pipefail
 readonly SERVICE_NAME="statix-agent"
 readonly SERVICE_USER="statix-agent"
 readonly SERVICE_GROUP="statix-agent"
-readonly DEFAULT_DOWNLOAD_BASE_URL="https://github.com/statixab/statix-agent/releases/latest/download"
+readonly DEFAULT_DOWNLOAD_BASE_URL="https://github.com/StatixSolutions/statix-agent/releases/latest/download"
 readonly UPDATE_SCRIPT_ASSET_NAME="statix-agent-update-archlinux.sh"
 
 DOWNLOAD_BASE_URL="${STATIX_DOWNLOAD_BASE_URL:-$DEFAULT_DOWNLOAD_BASE_URL}"

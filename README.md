@@ -23,7 +23,7 @@ The expected public release assets are:
 Installer assets should be published under:
 
 ```bash
-https://github.com/statixab/statix-agent/releases/latest/download
+https://github.com/StatixSolutions/statix-agent/releases/latest/download
 ```
 
 Public docs or bootstrap scripts in the `statix` repo should select the correct
