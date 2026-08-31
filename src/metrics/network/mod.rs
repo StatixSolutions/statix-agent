@@ -56,7 +56,7 @@ fn warn_unsupported_once() {
     static HAS_WARNED: std::sync::Once = std::sync::Once::new();
 
     HAS_WARNED.call_once(|| {
-        eprintln!("[Metrics] Network usage collection is not supported on this platform");
+        tracing::warn!("network usage collection is not supported on this platform");
     });
 }
 

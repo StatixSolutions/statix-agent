@@ -87,9 +87,11 @@ install_dependencies() {
     curl \
     iproute2 \
     lxc \
+    xz \
     pciutils \
     sudo \
-    wireguard-tools
+    wireguard-tools \
+    wget
 }
 
 download_file() {

@@ -11,6 +11,7 @@ use tokio::{
     process::Command as TokioCommand,
     time::{Duration, timeout},
 };
+use tracing::{debug, info, warn};
 
 use crate::jobs::{
     CommandSpec, ExecutionContext, JobExecutionResult, JobLogStream, PreparedWorkspace,
@@ -83,6 +84,15 @@ impl LxcContainer {
 
         ensure_lxc_directory_permissions()?;
 
+        info!(
+            container = %name,
+            distribution,
+            release,
+            architecture = lxc_arch(),
+            variant = "default",
+            "creating lxc container from image template"
+        );
+
         let lxc_path = lxc_storage_path();
         fs::create_dir_all(&lxc_path)
             .with_context(|| format!("failed to create {}", lxc_path.display()))?;
@@ -112,8 +122,9 @@ impl LxcContainer {
 
         if !status.success() {
             bail!(
-                "lxc-create failed for container {name} with {status}: {}",
-                lxc_log_excerpt(&log_path)
+                "lxc-create failed for container {name} with {status} (requested {distribution}:{release}, arch {}): {}. Verify the lxc-download template and image availability with `lxc-create -t download -n probe -- --list`",
+                lxc_arch(),
+                lxc_log_excerpt(&log_path),
             );
         }
 
@@ -233,10 +244,7 @@ impl LxcContainer {
     pub(super) async fn configure_guest_dns(&self, timeout_seconds: u64) -> Result<()> {
         let dns_config = container_dns_config();
         if dns_config.nameservers.is_empty() && !dns_config.include_default_gateway {
-            eprintln!(
-                "[statix-agent] lxc container {}: no non-loopback DNS resolvers found for guest",
-                self.name
-            );
+            warn!(container = %self.name, "no non-loopback DNS resolvers found for guest");
             return Ok(());
         }
 
@@ -249,20 +257,13 @@ impl LxcContainer {
                 summarize_raw_command_output(&output.stdout, &output.stderr)
             );
         }
-        eprintln!(
-            "[statix-agent] lxc container {}: configured guest DNS resolvers: {}",
-            self.name,
-            dns_config.display_nameservers()
-        );
+        debug!(container = %self.name, resolvers = %dns_config.display_nameservers(), "configured guest DNS resolvers");
         Ok(())
     }
 
     pub(super) async fn configure_guest_network(&self, timeout_seconds: u64) -> Result<()> {
         let Some(network) = lxc_bridge_network() else {
-            eprintln!(
-                "[statix-agent] lxc container {}: could not detect lxc bridge IPv4 network; leaving guest network unchanged",
-                self.name
-            );
+            warn!(container = %self.name, "could not detect lxc bridge IPv4 network; leaving guest network unchanged");
             return Ok(());
         };
         let guest_address = guest_ipv4_address(&network, &self.name);
@@ -276,10 +277,7 @@ impl LxcContainer {
                 summarize_raw_command_output(&output.stdout, &output.stderr)
             );
         }
-        eprintln!(
-            "[statix-agent] lxc container {}: ensured guest IPv4 network {} via {}",
-            self.name, guest_address, network.gateway
-        );
+        debug!(container = %self.name, guest_address = %guest_address, gateway = %network.gateway, "ensured guest IPv4 network");
         Ok(())
     }
 
@@ -321,11 +319,7 @@ impl LxcContainer {
         if !output.status.success() {
             let message =
                 summarize_command_output(&workspace.workdir, &output.stdout, &output.stderr);
-            eprintln!(
-                "[statix-agent] lxc container setup failed with {}; output: {}",
-                output.status,
-                truncate_for_log(&message, 1_000)
-            );
+            warn!(container = %self.name, status = %output.status, output = %truncate_for_log(&message, 1_000), "lxc container setup failed");
             return Ok(Some(JobExecutionResult {
                 status: "failed",
                 message: Some(message),
@@ -367,16 +361,12 @@ impl LxcContainer {
             )),
         );
 
-        eprintln!(
-            "[statix-agent] running command inside lxc container {}: {}",
-            self.name,
-            shell_join(&command.argv)
-        );
+        info!(container = %self.name, command = %redacted_command(&command.argv), "running command inside lxc container");
         let output = self
             .attach_output(timeout_seconds, &guest_command, Some(ctx))
             .await?;
         if output.status.success() {
-            eprintln!("[statix-agent] lxc container command succeeded");
+            info!(container = %self.name, status = "succeeded", "lxc container command finished");
             Ok(JobExecutionResult {
                 status: "succeeded",
                 message: Some(summarize_command_output(
@@ -388,11 +378,7 @@ impl LxcContainer {
         } else {
             let message =
                 summarize_command_output(&workspace.workdir, &output.stdout, &output.stderr);
-            eprintln!(
-                "[statix-agent] lxc container command failed with {}; output: {}",
-                output.status,
-                truncate_for_log(&message, 1_000)
-            );
+            warn!(container = %self.name, status = %output.status, output = %truncate_for_log(&message, 1_000), "lxc container command failed");
             Ok(JobExecutionResult {
                 status: "failed",
                 message: Some(message),
@@ -591,12 +577,7 @@ fn emit_stream_segment(
     }
 
     let message = String::from_utf8_lossy(segment);
-    eprintln!(
-        "[statix-agent] lxc container {} {} | {}",
-        container_name,
-        stream_name.as_str(),
-        message
-    );
+    debug!(container = %container_name, stream = stream_name.as_str(), output = %truncate_for_log(&message, 1_000), "lxc container output");
     if let Some(ctx) = ctx {
         ctx.emit_log(stream_name, message.into_owned());
     }
@@ -618,12 +599,31 @@ fn shell_env_key(key: &str) -> String {
 impl Drop for LxcContainer {
     fn drop(&mut self) {
         if !self.destroyed {
-            eprintln!(
-                "[statix-agent] lxc container {} was not destroyed before drop; cleanup may be needed",
-                self.name
-            );
+            warn!(container = %self.name, "lxc container was not destroyed before drop; cleanup may be needed");
         }
     }
+}
+
+fn redacted_command(command: &[String]) -> String {
+    command
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let previous = index.checked_sub(1).and_then(|i| command.get(i));
+            let sensitive = previous.is_some_and(|flag| {
+                matches!(
+                    flag.to_ascii_lowercase().as_str(),
+                    "--token" | "--password" | "--secret" | "--api-key" | "-p"
+                )
+            });
+            if sensitive {
+                "<redacted>".to_owned()
+            } else {
+                shell_escape(value)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn lxc_command(program: &str) -> TokioCommand {
@@ -673,6 +673,44 @@ fn lxc_storage_path() -> PathBuf {
     lxc_process_home()
         .map(|path| path.join("containers"))
         .unwrap_or_else(|| PathBuf::from("/var/lib/lxc"))
+}
+
+pub(crate) fn runtime_config_path(name: &str) -> PathBuf {
+    lxc_storage_path().join(name).join("config")
+}
+
+pub(crate) fn runtime_log_path(name: &str) -> PathBuf {
+    lxc_storage_path().join(name).join("statix-runtime.log")
+}
+
+pub(crate) fn runtime_command(program: &str, name: &str, args: &[String]) -> Vec<String> {
+    let mut command = vec![
+        "sudo".to_string(),
+        "-n".to_string(),
+        "--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY".to_string(),
+        lxc_helper_path().to_string(),
+        program.to_string(),
+        "-n".to_string(),
+        name.to_string(),
+        "-P".to_string(),
+        lxc_storage_path().display().to_string(),
+    ];
+    command.extend(args.iter().cloned());
+    command
+}
+
+pub(crate) fn configure_runtime(name: &str, cpu: u32, memory_mb: u32) -> Result<()> {
+    let mut config = fs::OpenOptions::new()
+        .append(true)
+        .open(runtime_config_path(name))
+        .with_context(|| format!("failed to open lxc config for {name}"))?;
+    write_job_lxc_config(
+        &mut config,
+        cpu.min(u8::MAX as u32) as u8,
+        memory_mb,
+        enforce_lxc_limits(),
+    )?;
+    Ok(())
 }
 
 fn ensure_lxc_directory_permissions() -> Result<()> {
@@ -750,4 +788,30 @@ fn enforce_lxc_limits() -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_command;
+
+    #[test]
+    fn runtime_command_uses_privileged_helper_and_explicit_storage() {
+        let command = runtime_command(
+            "lxc-attach",
+            "statix-project-runtime",
+            &["--".into(), "true".into()],
+        );
+
+        assert_eq!(command[0], "sudo");
+        assert_eq!(command[3], "/usr/local/libexec/statix-agent-lxc");
+        assert_eq!(command[4], "lxc-attach");
+        assert!(
+            command
+                .windows(2)
+                .any(|pair| pair == ["-n", "statix-project-runtime"])
+        );
+        assert_eq!(command[7], "-P");
+        assert!(command[8] == "/var/lib/lxc" || command[8].ends_with("/lxc/containers"));
+        assert_eq!(&command[9..], ["--", "true"]);
+    }
 }

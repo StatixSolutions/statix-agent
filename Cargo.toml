@@ -20,3 +20,5 @@ sha2 = "0.10.9"
 sysinfo = "0.37.2"
 tokio = { version = "1.47.1", features = ["macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }

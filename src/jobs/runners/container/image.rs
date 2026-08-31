@@ -28,7 +28,7 @@ impl LxcImage {
     }
 }
 
-fn normalize_release<'a>(distribution: &str, release: &'a str) -> &'a str {
+pub(crate) fn normalize_release<'a>(distribution: &str, release: &'a str) -> &'a str {
     match (distribution, release) {
         ("ubuntu", "24.04") => "noble",
         ("ubuntu", "22.04") => "jammy",
@@ -37,7 +37,7 @@ fn normalize_release<'a>(distribution: &str, release: &'a str) -> &'a str {
     }
 }
 
-pub(super) fn lxc_arch() -> &'static str {
+pub(crate) fn lxc_arch() -> &'static str {
     match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",

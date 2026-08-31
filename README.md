@@ -61,3 +61,17 @@ Both runtimes place the project files in `/home/statix/docker`.
 The Docker recipe mounts `/dev/kvm` and runs with the privileges required for
 nested virtualization. Missing images, privileges, or runtime
 dependencies fail the integration target rather than being skipped.
+
+## Logging
+
+The agent writes human-readable structured logs to stderr, which systemd
+captures in the journal. Logging defaults to `info` and can be filtered at
+runtime with `RUST_LOG`, for example:
+
+```sh
+RUST_LOG=debug statix-agent run
+journalctl -u statix-agent --no-pager -n 100
+```
+
+Job stdout and stderr continue to be forwarded to the server as job logs.
+Agent diagnostics are bounded and common secret arguments are redacted.

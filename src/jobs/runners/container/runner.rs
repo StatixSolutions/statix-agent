@@ -1,6 +1,7 @@
 use std::fs;
 
 use anyhow::{Context, Result, bail};
+use tracing::info;
 
 use crate::{
     config::agent_state_dir,
@@ -59,10 +60,7 @@ impl Runner for ContainerRunner {
         fs::create_dir_all(&runtime_root)
             .with_context(|| format!("failed to create {}", runtime_root.display()))?;
 
-        eprintln!(
-            "[statix-agent] job {}: preparing privileged lxc container {} from {}",
-            ctx.job_id, container_name, self.image
-        );
+        info!(job_id = %ctx.job_id, container = %container_name, image = %self.image, "preparing privileged lxc container");
         let workspace_tar = runtime_root.join(WORKSPACE_ARCHIVE);
         create_workspace_archive(&workspace_tar, &workspace.workdir).await?;
 
@@ -94,10 +92,7 @@ impl Runner for ContainerRunner {
         }
         .await;
 
-        eprintln!(
-            "[statix-agent] job {}: destroying lxc container {}",
-            ctx.job_id, container_name
-        );
+        info!(job_id = %ctx.job_id, container = %container_name, "destroying lxc container");
         container.destroy().await;
         result
     }

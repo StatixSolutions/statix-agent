@@ -107,13 +107,16 @@ install_dependencies() {
     cloud-image-utils \
     iproute2 \
     lxc \
+    lxc-templates \
+    xz-utils \
     pciutils \
     qemu-system-arm \
     qemu-system-x86 \
     qemu-utils \
     openssh-client \
     uidmap \
-    wireguard-tools
+    wireguard-tools \
+    wget
 }
 
 download_file() {

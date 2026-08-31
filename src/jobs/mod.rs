@@ -171,7 +171,11 @@ pub async fn execute_spec(
 ) -> Result<JobExecutionResult> {
     command.validate()?;
     match environment {
-        RunnerEnvironment::Host => runners::host::HostRunner.execute(ctx, workspace, &command).await,
+        RunnerEnvironment::Host => {
+            runners::host::HostRunner
+                .execute(ctx, workspace, &command)
+                .await
+        }
         RunnerEnvironment::Microvm {
             image,
             cpu,
