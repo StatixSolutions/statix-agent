@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub enum RunnerEnvironment {
+    Host,
     Microvm {
         image: String,
         cpu: Option<u8>,
@@ -170,6 +171,7 @@ pub async fn execute_spec(
 ) -> Result<JobExecutionResult> {
     command.validate()?;
     match environment {
+        RunnerEnvironment::Host => runners::host::HostRunner.execute(ctx, workspace, &command).await,
         RunnerEnvironment::Microvm {
             image,
             cpu,

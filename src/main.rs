@@ -21,6 +21,7 @@ use config::{AgentConfig, WireGuardConfig, agent_state_dir, resolve_login_config
 use enrollment::{LoginOptions, run_login};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
     process::Command as TokioCommand,
@@ -173,6 +174,24 @@ enum AgentJobSpec {
         #[serde(default)]
         execution: Option<JobExecutionConfig>,
     },
+    #[serde(rename = "deploy_docker")]
+    DeployDocker {
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "runtimeId")]
+        runtime_id: String,
+        revision: u64,
+        networks: BTreeMap<String, Value>,
+        services: BTreeMap<String, Value>,
+    },
+    #[serde(rename = "create_runtime")]
+    CreateRuntime { #[serde(rename = "projectId")] project_id: String, #[serde(rename = "runtimeId")] runtime_id: String, image: Option<String>, cpu: Option<u32>, #[serde(rename = "memoryMb")] memory_mb: Option<u32>, #[serde(rename = "diskGb")] disk_gb: Option<u32> },
+    #[serde(rename = "start_runtime")]
+    StartRuntime { #[serde(rename = "projectId")] project_id: String, #[serde(rename = "runtimeId")] runtime_id: String },
+    #[serde(rename = "stop_runtime")]
+    StopRuntime { #[serde(rename = "projectId")] project_id: String, #[serde(rename = "runtimeId")] runtime_id: String },
+    #[serde(rename = "destroy_runtime")]
+    DestroyRuntime { #[serde(rename = "projectId")] project_id: String, #[serde(rename = "runtimeId")] runtime_id: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -929,7 +948,74 @@ async fn execute_job(
             )
             .await
         }
+        AgentJobSpec::DeployDocker { project_id, runtime_id, revision, networks, services } => {
+            let workdir = agent_state_dir()?.join("deployments").join(project_id).join(runtime_id).join(revision.to_string());
+            fs::create_dir_all(&workdir)?;
+            let workspace = PreparedWorkspace { workdir };
+            let execution = ExecutionContext { job_id: job.id.clone(), attempt_id: job.id.clone(), timeout_seconds: 1800, log_tx: Some(log_tx) };
+            let runtime_name = runtime_name(project_id, runtime_id);
+            for name in networks.keys() {
+                let docker_name = format!("statix-{}-{}", safe_path_segment(project_id), safe_path_segment(name));
+                let inspect = jobs::execute(&RunnerEnvironment::Host, &execution, &workspace, &runtime_command(&runtime_name, vec!["docker".into(), "network".into(), "inspect".into(), docker_name.clone()])).await?;
+                if inspect.status == "succeeded" { continue; }
+                let mut create_args = vec!["docker".into(), "network".into(), "create".into(), "--label".into(), format!("com.statix.project={project_id}")];
+                if networks.get(name).and_then(Value::as_object).and_then(|network| network.get("internal")).and_then(Value::as_bool).unwrap_or(false) { create_args.push("--internal".into()); }
+                create_args.push(docker_name);
+                let result = jobs::execute(&RunnerEnvironment::Host, &execution, &workspace, &runtime_command(&runtime_name, create_args)).await?;
+                if result.status == "failed" { return Ok(result); }
+            }
+            for (name, deployment) in services {
+                let image = deployment.get("image").and_then(Value::as_str).ok_or_else(|| anyhow!("deployment {name} has no image"))?;
+                let node_name = format!("statix-{}-{}", safe_path_segment(project_id), safe_path_segment(name));
+                let _ = jobs::execute(&RunnerEnvironment::Host, &execution, &workspace, &runtime_command(&runtime_name, vec!["docker".into(), "rm".into(), "-f".into(), node_name.clone()])).await;
+                let mut args = vec!["docker".into(), "run".into(), "-d".into(), "--name".into(), node_name, "--label".into(), format!("com.statix.project={project_id}"), "--label".into(), format!("com.statix.revision={revision}")];
+                if let Some(restart) = deployment.get("restart").and_then(Value::as_str) { args.extend(["--restart".into(), restart.to_string()]); }
+                if let Some(env) = deployment.get("env").and_then(Value::as_object) { for (key, value) in env { if let Some(value) = value.as_str() { args.extend(["-e".into(), format!("{key}={value}")]); } } }
+                if let Some(mounts) = deployment.get("mounts").and_then(Value::as_array) { for mount in mounts { if let (Some(source), Some(target)) = (mount.get("source").and_then(Value::as_str), mount.get("target").and_then(Value::as_str)) { let mode = if mount.get("readOnly").and_then(Value::as_bool).unwrap_or(false) { ":ro" } else { "" }; args.extend(["-v".into(), format!("{source}:{target}{mode}")]); } } }
+                // Host publishing is deliberately not inferred from container ports.
+                // Explicit bridge exposure is handled by the agent proxy.
+                if let Some(networks) = deployment.get("networks").and_then(Value::as_array) { for (index, network) in networks.iter().filter_map(Value::as_str).enumerate() { let network_name = format!("statix-{}-{}", safe_path_segment(project_id), safe_path_segment(network)); if index == 0 { args.extend(["--network".into(), network_name]); } else { args.extend(["--network-alias".into(), name.to_string()]); } } }
+                if let Some(entrypoint) = deployment.get("entrypoint").and_then(Value::as_array) { args.extend(["--entrypoint".into(), entrypoint.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")]); }
+                args.push(image.to_string());
+                if let Some(command) = deployment.get("command").and_then(Value::as_array) { args.extend(command.iter().filter_map(Value::as_str).map(str::to_string)); }
+                let result = jobs::execute(&RunnerEnvironment::Host, &execution, &workspace, &runtime_command(&runtime_name, args)).await?;
+                if result.status == "failed" { return Ok(result); }
+            }
+            Ok(jobs::JobExecutionResult { status: "succeeded", message: Some(format!("Docker revision {revision} reconciled")) })
+        }
+        AgentJobSpec::CreateRuntime { project_id, runtime_id, image, cpu, memory_mb, disk_gb } => {
+            let workdir = agent_state_dir()?.join("runtime").join(safe_path_segment(runtime_id));
+            fs::create_dir_all(&workdir)?;
+            let workspace = PreparedWorkspace { workdir };
+            let execution = ExecutionContext { job_id: job.id.clone(), attempt_id: job.id.clone(), timeout_seconds: 3600, log_tx: Some(log_tx.clone()) };
+            let name = runtime_name(project_id, runtime_id);
+            let image = image.as_deref().unwrap_or("ubuntu:24.04");
+            let mut parts = image.splitn(2, ':');
+            let distribution = parts.next().unwrap_or("ubuntu");
+            let release = parts.next().unwrap_or("24.04");
+            let command = format!("if ! lxc-info -n {name} >/dev/null 2>&1; then lxc-create -n {name} -t download -- -d {distribution} -r {release} -a amd64; fi; lxc-start -n {name} 2>/dev/null || true; lxc-attach -n {name} -- bash -lc 'command -v docker >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io); systemctl enable --now docker 2>/dev/null || true'");
+            let result = jobs::execute(&RunnerEnvironment::Host, &execution, &workspace, &vec!["bash".into(), "-lc".into(), command]).await?;
+            let _ = (cpu, memory_mb, disk_gb);
+            Ok(result)
+        }
+        AgentJobSpec::StartRuntime { project_id, runtime_id } => { let workspace = PreparedWorkspace { workdir: agent_state_dir()?.join("runtime") }; let execution = ExecutionContext { job_id: job.id.clone(), attempt_id: job.id.clone(), timeout_seconds: 1800, log_tx: Some(log_tx.clone()) }; runtime_lifecycle_command(&execution, &workspace, &runtime_name(project_id, runtime_id), "lxc-start -n", false).await }
+        AgentJobSpec::StopRuntime { project_id, runtime_id } => { let workspace = PreparedWorkspace { workdir: agent_state_dir()?.join("runtime") }; let execution = ExecutionContext { job_id: job.id.clone(), attempt_id: job.id.clone(), timeout_seconds: 1800, log_tx: Some(log_tx.clone()) }; runtime_lifecycle_command(&execution, &workspace, &runtime_name(project_id, runtime_id), "lxc-stop -n", false).await }
+        AgentJobSpec::DestroyRuntime { project_id, runtime_id } => { let workspace = PreparedWorkspace { workdir: agent_state_dir()?.join("runtime") }; let execution = ExecutionContext { job_id: job.id.clone(), attempt_id: job.id.clone(), timeout_seconds: 1800, log_tx: Some(log_tx.clone()) }; runtime_lifecycle_command(&execution, &workspace, &runtime_name(project_id, runtime_id), "lxc-destroy -n", true).await }
     }
+}
+
+fn runtime_name(project_id: &str, runtime_id: &str) -> String { format!("statix-{}-{}", safe_path_segment(project_id), safe_path_segment(runtime_id)) }
+
+fn runtime_command(runtime: &str, mut args: Vec<String>) -> Vec<String> {
+    let mut command = vec!["lxc-attach".into(), "-n".into(), runtime.to_string(), "--".into()];
+    command.append(&mut args);
+    command
+}
+
+async fn runtime_lifecycle_command(execution: &ExecutionContext, workspace: &PreparedWorkspace, runtime_id: &str, command: &str, force: bool) -> Result<jobs::JobExecutionResult> {
+    let name = safe_path_segment(runtime_id);
+    let suffix = if force { " -f" } else { "" };
+    jobs::execute(&RunnerEnvironment::Host, execution, workspace, &vec!["bash".into(), "-lc".into(), format!("{command} {name}{suffix}")]).await
 }
 
 fn project_systemd_command(project_id: &str, environment: &str, command: &[String]) -> Vec<String> {
@@ -990,6 +1076,7 @@ fn shell_env_key(key: &str) -> Option<String> {
 
 fn runner_environment_label(environment: &RunnerEnvironment) -> &'static str {
     match environment {
+        RunnerEnvironment::Host => "host",
         RunnerEnvironment::Microvm { .. } => "microvm",
         RunnerEnvironment::ProjectMicrovm { .. } => "project microvm",
         RunnerEnvironment::Container { .. } => "container",
