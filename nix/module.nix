@@ -16,6 +16,11 @@ let
     pkgs.qemu-utils
     pkgs.qemu_kvm
   ];
+  lxcRuntimeDeps = [
+    pkgs.lxc
+    pkgs.wget
+    pkgs.xz
+  ];
   microvmPreStartScript = pkgs.writeShellScript "statix-agent-microvm-pre-start" ''
     set -euo pipefail
 
@@ -106,6 +111,7 @@ in
       cfg.package
     ]
     ++ lib.optionals cfg.microvm.enable microvmRuntimeDeps
+    ++ lxcRuntimeDeps
     ++ lib.optionals cfg.wireguardTools [
       pkgs.wireguard-tools
     ];
@@ -140,7 +146,7 @@ in
         HOME = cfg.stateDir;
       };
 
-      path = lib.optionals cfg.microvm.enable microvmRuntimeDeps;
+      path = lxcRuntimeDeps ++ lib.optionals cfg.microvm.enable microvmRuntimeDeps;
 
       serviceConfig = {
         Type = "simple";

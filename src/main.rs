@@ -9,8 +9,9 @@ use std::{
     collections::BTreeMap,
     collections::VecDeque,
     collections::hash_map::DefaultHasher,
-    fs,
+    env, fs,
     hash::{Hash, Hasher},
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -21,6 +22,7 @@ use config::{AgentConfig, WireGuardConfig, agent_state_dir, resolve_login_config
 use enrollment::{LoginOptions, run_login};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
     process::Command as TokioCommand,
@@ -29,8 +31,12 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
+    jobs::runners::container::image::{lxc_arch, normalize_release},
+    jobs::runners::container::lxc,
     jobs::{ExecutionContext, PreparedWorkspace, RunnerEnvironment},
     metrics::collect_metrics,
     system_info::collect_system_info,
@@ -107,6 +113,14 @@ enum JobEnvironment {
         #[serde(rename = "memoryMb", default)]
         memory_mb: Option<u32>,
     },
+    Container {
+        #[serde(default)]
+        image: Option<String>,
+        #[serde(default)]
+        cpu: Option<u8>,
+        #[serde(rename = "memoryMb", default)]
+        memory_mb: Option<u32>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -165,6 +179,50 @@ enum AgentJobSpec {
         #[serde(default)]
         execution: Option<JobExecutionConfig>,
     },
+    #[serde(rename = "deploy_docker")]
+    DeployDocker {
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "runtimeId")]
+        runtime_id: String,
+        revision: u64,
+        networks: BTreeMap<String, Value>,
+        services: BTreeMap<String, Value>,
+    },
+    #[serde(rename = "create_runtime")]
+    CreateRuntime {
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "runtimeId")]
+        runtime_id: String,
+        image: Option<String>,
+        cpu: Option<u32>,
+        #[serde(rename = "memoryMb")]
+        memory_mb: Option<u32>,
+        #[serde(rename = "diskGb")]
+        disk_gb: Option<u32>,
+    },
+    #[serde(rename = "start_runtime")]
+    StartRuntime {
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "runtimeId")]
+        runtime_id: String,
+    },
+    #[serde(rename = "stop_runtime")]
+    StopRuntime {
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "runtimeId")]
+        runtime_id: String,
+    },
+    #[serde(rename = "destroy_runtime")]
+    DestroyRuntime {
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "runtimeId")]
+        runtime_id: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,6 +258,22 @@ struct DeploymentSetup {
     run: Vec<String>,
     #[serde(default)]
     exports: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExposurePortState {
+    ports: BTreeMap<String, u16>,
+}
+
+#[derive(Debug, Clone)]
+struct ExposureRoute {
+    service_name: String,
+    bridge_ip: Ipv4Addr,
+    bridge_port: u16,
+    backend_port: u16,
+    target_port: u16,
+    protocol: String,
+    runtime_ip: Ipv4Addr,
 }
 
 enum SessionOutcome {
@@ -259,10 +333,24 @@ impl LoginArgs {
 
 #[tokio::main]
 async fn main() {
+    init_logging();
     if let Err(error) = dispatch().await {
-        eprintln!("[statix-agent] fatal error: {error:#}");
+        error!(error = %format_error_chain(&error), "fatal error");
         std::process::exit(1);
     }
+}
+
+fn init_logging() {
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(value) => EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new("info")),
+        Err(_) if env_flag("STATIX_VERBOSE_LOGS") => EnvFilter::new("debug"),
+        Err(_) => EnvFilter::new("info"),
+    };
+    fmt::Subscriber::builder()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_ansi(false)
+        .init();
 }
 
 async fn dispatch() -> Result<()> {
@@ -293,14 +381,8 @@ async fn run_agent() -> Result<()> {
     let config = AgentConfig::load()?.context(
         "Agent identity not configured. Run `statix-agent login --api-base-url http://host:3001` with STATIX_AGENT_CONFIG pointing at the service config, or set NODE_ID/NODE_TOKEN in the environment.",
     )?;
-    eprintln!("[statix-agent] starting with nodeId: {}", config.node_id);
-    log_verbose(&format!(
-        "runtime config: ws={}, api={}, publish={}ms, system-check={}ms",
-        config.agent_ws_url,
-        config.api_base_url,
-        config.publish_interval_ms,
-        config.system_info_check_interval_ms
-    ));
+    info!(node_id = %config.node_id, "starting agent");
+    debug!(websocket_url = %redact_url(&config.agent_ws_url), api_url = %redact_url(&config.api_base_url), publish_interval_ms = config.publish_interval_ms, system_info_check_interval_ms = config.system_info_check_interval_ms, "loaded runtime configuration");
 
     if let Some(wireguard) = config
         .wireguard
@@ -309,14 +391,10 @@ async fn run_agent() -> Result<()> {
     {
         match ensure_wireguard_applied(wireguard).await {
             Ok(path) => {
-                eprintln!(
-                    "[statix-agent] wireguard applied on {} using {}",
-                    wireguard.interface_name,
-                    path.display()
-                );
+                info!(interface = %wireguard.interface_name, config_path = %path.display(), "wireguard configuration applied");
             }
             Err(error) => {
-                eprintln!("[statix-agent] wireguard apply failed: {error:#}");
+                warn!(error = %error, "wireguard apply failed");
             }
         }
     }
@@ -330,7 +408,7 @@ async fn run_agent() -> Result<()> {
         match run_session(&config, stop_rx_main.clone()).await {
             Ok(SessionOutcome::Stopped) => break,
             Err(error) => {
-                eprintln!("[statix-agent] session failed: {error:#}");
+                warn!(error = %error, "websocket session failed; reconnecting");
             }
         }
 
@@ -348,7 +426,7 @@ async fn run_agent() -> Result<()> {
         }
     }
 
-    eprintln!("[statix-agent] stopped");
+    info!("agent stopped");
     Ok(())
 }
 
@@ -370,7 +448,7 @@ async fn run_session(
     .context("failed to connect websocket")?;
     let (mut ws, _) = connect;
 
-    eprintln!("[statix-agent] connected to {}", config.agent_ws_url);
+    info!(websocket_url = %redact_url(&config.agent_ws_url), "connected to server");
 
     send_client_message(
         &mut ws,
@@ -388,7 +466,7 @@ async fn run_session(
     let mut last_system_info_published_at: Option<Instant> = None;
 
     if let Err(error) = send_initial_metrics(&mut ws).await {
-        eprintln!("[statix-agent] publish failed: {error:#}");
+        warn!(error = %error, "initial metrics publish failed");
     }
 
     if let Err(error) = send_initial_system_info(
@@ -399,7 +477,7 @@ async fn run_session(
     )
     .await
     {
-        eprintln!("[statix-agent] system info publish failed: {error:#}");
+        warn!(error = %error, "initial system info publish failed");
     }
 
     let mut publish_tick = interval(Duration::from_millis(config.publish_interval_ms));
@@ -459,7 +537,7 @@ async fn run_session(
             };
 
             if let Err(error) = send_result {
-                eprintln!("[statix-agent] outbound send failed: {error:#}");
+                warn!(error = %error, "outbound message send failed");
                 break;
             }
         }
@@ -471,13 +549,13 @@ async fn run_session(
         if !active_job {
             if let Some(job) = queued_jobs.pop_front() {
                 active_job = true;
-                eprintln!("[statix-agent] job {}: accepted", job.id);
+                info!(job_id = %job.id, "job accepted");
                 let accepted = outbound_tx.send(OutboundMessage::JobStatus {
                     job_id: job.id.clone(),
                     status: "accepted",
                     message: None,
                 });
-                eprintln!("[statix-agent] job {}: started", job.id);
+                info!(job_id = %job.id, "job started");
                 let started = outbound_tx.send(OutboundMessage::JobStatus {
                     job_id: job.id.clone(),
                     status: "started",
@@ -491,22 +569,35 @@ async fn run_session(
                 let job_done_tx = job_done_tx.clone();
                 let job_log_tx = job_log_tx.clone();
                 tokio::spawn(async move {
-                    let completed = match execute_job(&config, &job, job_log_tx).await {
+                    let completed = match execute_job(&config, &job, job_log_tx.clone()).await {
                         Ok(result) => CompletedJobStatus {
                             job_id: job.id.clone(),
                             status: result.status,
                             message: result.message,
                         },
-                        Err(error) => CompletedJobStatus {
-                            job_id: job.id.clone(),
-                            status: "failed",
-                            message: Some(format_error_chain(&error)),
-                        },
+                        Err(error) => {
+                            let message = format_error_chain(&error);
+                            let _ = job_log_tx.send(jobs::JobLogLine {
+                                job_id: job.id.clone(),
+                                attempt_id: job.id.clone(),
+                                stream: jobs::JobLogStream::Stderr,
+                                line: message.clone(),
+                            });
+                            CompletedJobStatus {
+                                job_id: job.id.clone(),
+                                status: "failed",
+                                message: Some(message),
+                            }
+                        }
                     };
-                    eprintln!(
-                        "[statix-agent] job {}: completed locally with status {}",
-                        completed.job_id, completed.status
-                    );
+                    if completed.status == "failed" {
+                        error!(
+                            job_id = %completed.job_id,
+                            reason = %completed.message.as_deref().unwrap_or("unknown failure"),
+                            "job execution failed"
+                        );
+                    }
+                    info!(job_id = %completed.job_id, status = completed.status, "job completed locally");
                     let _ = job_done_tx.send(completed);
                 });
             }
@@ -520,18 +611,15 @@ async fn run_session(
                             return Err(anyhow!("server error: {error}"));
                         }
                         Ok(ServerMessage::Ready { node_id }) => {
-                            log_verbose(&format!("server ready for nodeId={node_id}"));
+                            debug!(node_id = %node_id, "server ready");
                         }
                         Ok(ServerMessage::Job { job }) => {
-                            log_verbose(&format!("received job {}", job.id));
+                            debug!(job_id = %job.id, "received job");
                             let _issued_at = job.issued_at;
                             queued_jobs.push_back(job);
                         }
                         Err(_) => {
-                            log_verbose(&format!(
-                                "ignored non-server-message websocket payload: {}",
-                                truncate_for_log(&text, 200)
-                            ));
+                            debug!(payload = %truncate_for_log(&text, 200), "ignored non-server-message websocket payload");
                         }
                     }
                 }
@@ -555,7 +643,7 @@ async fn run_session(
             },
             _ = publish_tick.tick() => {
                 if let Err(error) = publish_metrics_once(&outbound_tx).await {
-                    eprintln!("[statix-agent] publish failed: {error:#}");
+                    warn!(error = %error, "metrics publish failed");
                 }
             }
             _ = system_tick.tick() => {
@@ -567,7 +655,7 @@ async fn run_session(
                     &mut last_system_info_hash,
                     &mut last_system_info_published_at,
                 ).await {
-                    eprintln!("[statix-agent] system info publish failed: {error:#}");
+                    warn!(error = %error, "system info publish failed");
                 }
             }
             completed = job_done_rx.recv() => {
@@ -579,10 +667,10 @@ async fn run_session(
                 let status = completed.status;
                 if completed.status == "failed" {
                     if let Some(message) = completed.message.as_deref() {
-                        log_verbose(&format!("job {} failed: {message}", completed.job_id));
+                        warn!(job_id = %completed.job_id, message = %message, "job failed");
                     }
                 } else {
-                    log_verbose(&format!("job {} finished with status {}", completed.job_id, completed.status));
+                    debug!(job_id = %completed.job_id, status = completed.status, "job finished");
                 }
                 if outbound_tx.send(OutboundMessage::JobStatus {
                     job_id: completed.job_id,
@@ -591,9 +679,7 @@ async fn run_session(
                 }).is_err() {
                     return Err(anyhow!("websocket writer is unavailable"));
                 }
-                eprintln!(
-                    "[statix-agent] job {job_id}: {status} status update queued for websocket delivery"
-                );
+                debug!(job_id = %job_id, status = %status, "job status update queued for websocket delivery");
             }
             log = job_log_rx.recv() => {
                 let Some(log) = log else {
@@ -616,7 +702,7 @@ async fn publish_metrics_once(outbound_tx: &mpsc::UnboundedSender<OutboundMessag
         .send(OutboundMessage::Metrics(metrics))
         .map_err(|_| anyhow!("metrics channel closed"))
         .context("failed to queue metrics payload")?;
-    log_verbose("metrics payload published");
+    debug!("metrics payload queued");
     Ok(())
 }
 
@@ -629,7 +715,7 @@ where
     send_client_message(ws, &ClientMessage::Metrics { payload: &metrics })
         .await
         .context("failed to publish metrics payload")?;
-    log_verbose("metrics payload published");
+    debug!("initial metrics payload published");
     Ok(())
 }
 
@@ -655,7 +741,7 @@ async fn publish_system_info_if_needed(
             .context("failed to queue system info payload")?;
         *last_hash = Some(hash);
         *last_published_at = Some(Instant::now());
-        log_verbose("system info payload published");
+        debug!(changed, freshness_due, "system info payload queued");
     }
 
     Ok(())
@@ -682,7 +768,7 @@ where
     .context("failed to publish system info payload")?;
     *last_hash = Some(system_info.hash);
     *last_published_at = Some(Instant::now());
-    log_verbose("system info payload published");
+    debug!("initial system info payload published");
     Ok(())
 }
 
@@ -765,17 +851,22 @@ async fn execute_job(
                     cpu: cpu.or(Some(config.microvm_default_cpu)),
                     memory_mb: memory_mb.or(Some(config.microvm_default_memory_mb)),
                 },
+                Some(JobEnvironment::Container {
+                    image,
+                    cpu,
+                    memory_mb,
+                }) => RunnerEnvironment::Container {
+                    image: image.unwrap_or_else(|| config.container_default_image.clone()),
+                    cpu,
+                    memory_mb,
+                },
                 None => RunnerEnvironment::Microvm {
                     image: config.microvm_default_image.clone(),
                     cpu: Some(config.microvm_default_cpu),
                     memory_mb: Some(config.microvm_default_memory_mb),
                 },
             };
-            eprintln!(
-                "[statix-agent] job {}: executing cargo_test in {} environment",
-                job.id,
-                runner_environment_label(&environment)
-            );
+            info!(job_id = %job.id, runner = runner_environment_label(&environment), "executing cargo_test");
 
             jobs::execute(
                 &environment,
@@ -821,6 +912,15 @@ async fn execute_job(
                     cpu: cpu.or(Some(config.microvm_default_cpu)),
                     memory_mb: memory_mb.or(Some(config.microvm_default_memory_mb)),
                 },
+                Some(JobEnvironment::Container {
+                    image,
+                    cpu,
+                    memory_mb,
+                }) => RunnerEnvironment::Container {
+                    image: image.unwrap_or_else(|| config.container_default_image.clone()),
+                    cpu,
+                    memory_mb,
+                },
                 None => RunnerEnvironment::ProjectMicrovm {
                     project_id: project_id.clone(),
                     environment: environment.clone(),
@@ -839,11 +939,7 @@ async fn execute_job(
                 environment.clone(),
             );
 
-            eprintln!(
-                "[statix-agent] job {}: executing deploy_bundle in {} environment",
-                job.id,
-                runner_environment_label(&runner_environment)
-            );
+            info!(job_id = %job.id, runner = runner_environment_label(&runner_environment), "executing deploy_bundle");
 
             for setup_step in setup {
                 if setup_step.run.is_empty() {
@@ -903,7 +999,734 @@ async fn execute_job(
             )
             .await
         }
+        AgentJobSpec::DeployDocker {
+            project_id,
+            runtime_id,
+            revision,
+            networks,
+            services,
+        } => {
+            let reconciliation_started_at = Instant::now();
+            let workdir = agent_state_dir()?
+                .join("deployments")
+                .join(project_id)
+                .join(runtime_id)
+                .join(revision.to_string());
+            fs::create_dir_all(&workdir)?;
+            let workspace = PreparedWorkspace { workdir };
+            let execution = ExecutionContext {
+                job_id: job.id.clone(),
+                attempt_id: job.id.clone(),
+                timeout_seconds: 1800,
+                log_tx: Some(log_tx),
+            };
+            let runtime_name = runtime_name(project_id, runtime_id);
+            info!(job_id = %job.id, project_id = %project_id, runtime_id = %runtime_id, revision, runtime = %runtime_name, networks = networks.len(), services = services.len(), "starting docker reconciliation");
+            let runtime_ip = lxc::runtime_ipv4(&runtime_name).await?;
+            info!(job_id = %job.id, runtime = %runtime_name, runtime_ip = %runtime_ip, "resolved lxc runtime network");
+            let mut port_state = load_exposure_port_state()?;
+            let mut exposure_routes = Vec::new();
+            let mut active_exposure_keys = std::collections::HashSet::new();
+            for (service_name, deployment) in services.iter() {
+                let Some(expose) = deployment.get("expose").and_then(Value::as_object) else {
+                    continue;
+                };
+                let protocol = expose
+                    .get("protocol")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tcp")
+                    .to_ascii_lowercase();
+                if protocol != "tcp" && protocol != "udp" {
+                    bail!("deployment {service_name} exposure protocol must be tcp or udp");
+                }
+                let key = format!("{project_id}/{service_name}/{protocol}");
+                let backend_port = allocate_exposure_port(&mut port_state, &key)?;
+                let bridge_ip = expose
+                    .get("bridgeIp")
+                    .and_then(Value::as_str)
+                    .unwrap_or("0.0.0.0")
+                    .parse::<Ipv4Addr>()
+                    .map_err(|_| {
+                        anyhow!("deployment {service_name} exposure bridgeIp is not IPv4")
+                    })?;
+                if bridge_ip != Ipv4Addr::UNSPECIFIED && !host_has_ipv4(bridge_ip) {
+                    bail!("exposure bind IP {bridge_ip} is not assigned to this node");
+                }
+                let bridge_port = expose
+                    .get("bridgePort")
+                    .map(|value| json_port(Some(value), "bridgePort", service_name))
+                    .transpose()?
+                    .unwrap_or(backend_port);
+                let target_port = expose
+                    .get("targetPort")
+                    .map(|value| json_port(Some(value), "targetPort", service_name))
+                    .transpose()?
+                    .or_else(|| infer_declared_target_port(deployment, &protocol))
+                    .ok_or_else(|| anyhow!("deployment {service_name} exposure needs targetPort; declare exactly one matching service port or set targetPort"))?;
+                info!(job_id = %job.id, service = %service_name, protocol = %protocol, runtime_ip = %runtime_ip, target_port, bind_address = %bridge_ip, bridge_port, backend_port, "resolved service exposure");
+                active_exposure_keys.insert(key);
+                exposure_routes.push(ExposureRoute {
+                    service_name: service_name.clone(),
+                    bridge_ip,
+                    bridge_port,
+                    backend_port,
+                    target_port,
+                    protocol,
+                    runtime_ip,
+                });
+            }
+            let project_prefix = format!("{project_id}/");
+            port_state.ports.retain(|key, _| {
+                !key.starts_with(&project_prefix) || active_exposure_keys.contains(key)
+            });
+            for name in networks.keys() {
+                let docker_name = format!(
+                    "statix-{}-{}",
+                    safe_path_segment(project_id),
+                    safe_path_segment(name)
+                );
+                let inspect = jobs::execute(
+                    &RunnerEnvironment::Host,
+                    &execution,
+                    &workspace,
+                    &runtime_attach_command(
+                        &runtime_name,
+                        vec![
+                            "docker".into(),
+                            "network".into(),
+                            "inspect".into(),
+                            docker_name.clone(),
+                        ],
+                    ),
+                )
+                .await?;
+                if inspect.status == "succeeded" {
+                    info!(job_id = %job.id, network = %docker_name, "reusing docker network");
+                    continue;
+                }
+                let mut create_args = vec![
+                    "docker".into(),
+                    "network".into(),
+                    "create".into(),
+                    "--label".into(),
+                    format!("com.statix.project={project_id}"),
+                ];
+                if networks
+                    .get(name)
+                    .and_then(Value::as_object)
+                    .and_then(|network| network.get("internal"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    create_args.push("--internal".into());
+                }
+                create_args.push(docker_name.clone());
+                let result = jobs::execute(
+                    &RunnerEnvironment::Host,
+                    &execution,
+                    &workspace,
+                    &runtime_attach_command(&runtime_name, create_args),
+                )
+                .await?;
+                if result.status == "failed" {
+                    return Ok(result);
+                }
+                let internal = networks
+                    .get(name)
+                    .and_then(|network| network.get("internal"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                info!(job_id = %job.id, network = %docker_name, internal, "created docker network");
+            }
+            for (name, deployment) in services {
+                let image = deployment
+                    .get("image")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("deployment {name} has no image"))?;
+                let node_name = format!(
+                    "statix-{}-{}",
+                    safe_path_segment(project_id),
+                    safe_path_segment(name)
+                );
+                let exposure = exposure_routes
+                    .iter()
+                    .find(|route| route.service_name == *name);
+                info!(job_id = %job.id, service = %name, container = %node_name, image = %image, runtime = %runtime_name, "starting docker service");
+                let _ = jobs::execute(
+                    &RunnerEnvironment::Host,
+                    &execution,
+                    &workspace,
+                    &runtime_attach_command(
+                        &runtime_name,
+                        vec!["docker".into(), "rm".into(), "-f".into(), node_name.clone()],
+                    ),
+                )
+                .await;
+                let mut args = vec![
+                    "docker".into(),
+                    "run".into(),
+                    "-d".into(),
+                    "--name".into(),
+                    node_name.clone(),
+                    "--label".into(),
+                    format!("com.statix.project={project_id}"),
+                    "--label".into(),
+                    format!("com.statix.revision={revision}"),
+                ];
+                if let Some(restart) = deployment.get("restart").and_then(Value::as_str) {
+                    args.extend(["--restart".into(), restart.to_string()]);
+                }
+                if let Some(route) = exposure {
+                    args.extend([
+                        "-p".into(),
+                        format!(
+                            "{}:{}{}",
+                            route.backend_port,
+                            route.target_port,
+                            if route.protocol == "udp" {
+                                "/udp"
+                            } else {
+                                "/tcp"
+                            }
+                        ),
+                    ]);
+                }
+                if let Some(env) = deployment.get("env").and_then(Value::as_object) {
+                    for (key, value) in env {
+                        if let Some(value) = value.as_str() {
+                            args.extend(["-e".into(), format!("{key}={value}")]);
+                        }
+                    }
+                }
+                if let Some(mounts) = deployment.get("mounts").and_then(Value::as_array) {
+                    for mount in mounts {
+                        if let (Some(source), Some(target)) = (
+                            mount.get("source").and_then(Value::as_str),
+                            mount.get("target").and_then(Value::as_str),
+                        ) {
+                            let mode = if mount
+                                .get("readOnly")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                            {
+                                ":ro"
+                            } else {
+                                ""
+                            };
+                            args.extend(["-v".into(), format!("{source}:{target}{mode}")]);
+                        }
+                    }
+                }
+                // Host publishing is deliberately not inferred from container ports.
+                // Explicit bridge exposure is handled by the agent proxy.
+                if let Some(networks) = deployment.get("networks").and_then(Value::as_array) {
+                    for (index, network) in networks.iter().filter_map(Value::as_str).enumerate() {
+                        let network_name = format!(
+                            "statix-{}-{}",
+                            safe_path_segment(project_id),
+                            safe_path_segment(network)
+                        );
+                        if index == 0 && exposure.is_none() {
+                            args.extend(["--network".into(), network_name]);
+                        }
+                    }
+                }
+                if exposure.is_some() {
+                    args.extend(["--network".into(), "bridge".into()]);
+                }
+                if let Some(entrypoint) = deployment.get("entrypoint").and_then(Value::as_array) {
+                    args.extend([
+                        "--entrypoint".into(),
+                        entrypoint
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ]);
+                }
+                args.push(image.to_string());
+                if let Some(command) = deployment.get("command").and_then(Value::as_array) {
+                    args.extend(command.iter().filter_map(Value::as_str).map(str::to_string));
+                }
+                let result = jobs::execute(
+                    &RunnerEnvironment::Host,
+                    &execution,
+                    &workspace,
+                    &runtime_attach_command(&runtime_name, args),
+                )
+                .await?;
+                if result.status == "failed" {
+                    return Ok(result);
+                }
+                if exposure.is_some() {
+                    if let Some(networks) = deployment.get("networks").and_then(Value::as_array) {
+                        for network in networks.iter().filter_map(Value::as_str) {
+                            let network_name = format!(
+                                "statix-{}-{}",
+                                safe_path_segment(project_id),
+                                safe_path_segment(network)
+                            );
+                            let connect = jobs::execute(
+                                &RunnerEnvironment::Host,
+                                &execution,
+                                &workspace,
+                                &runtime_attach_command(
+                                    &runtime_name,
+                                    vec![
+                                        "docker".into(),
+                                        "network".into(),
+                                        "connect".into(),
+                                        "--alias".into(),
+                                        name.to_string(),
+                                        network_name.clone(),
+                                        node_name.clone(),
+                                    ],
+                                ),
+                            )
+                            .await?;
+                            if connect.status == "failed" {
+                                return Ok(connect);
+                            }
+                            debug!(job_id = %job.id, service = %name, network = %network_name, "connected exposed service to project network");
+                        }
+                    }
+                }
+                if let Some(route) = exposure_routes
+                    .iter()
+                    .find(|route| route.service_name == *name)
+                {
+                    let port_check = jobs::execute(
+                        &RunnerEnvironment::Host,
+                        &execution,
+                        &workspace,
+                        &runtime_attach_command(
+                            &runtime_name,
+                            vec![
+                                "docker".into(),
+                                "inspect".into(),
+                                "-f".into(),
+                                "{{if .NetworkSettings.Ports}}{{json .NetworkSettings.Ports}}{{else}}null{{end}}".into(),
+                                node_name.clone(),
+                            ],
+                        ),
+                    )
+                    .await?;
+                    if port_check.status == "failed" {
+                        return Ok(port_check);
+                    }
+                    if port_check
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.trim_end().ends_with("null"))
+                    {
+                        bail!(
+                            "docker service {name} started without an active published port {}:{}",
+                            route.bridge_ip,
+                            route.bridge_port
+                        );
+                    }
+                    info!(job_id = %job.id, service = %name, container = %node_name, bind_address = %route.bridge_ip, bridge_port = route.bridge_port, runtime_ip = %route.runtime_ip, backend_port = route.backend_port, target_port = route.target_port, protocol = %route.protocol, "docker service started with exposure");
+                } else {
+                    info!(job_id = %job.id, service = %name, container = %node_name, "docker service started without exposure");
+                }
+            }
+            write_nginx_routes(&exposure_routes).await?;
+            save_exposure_port_state(&port_state)?;
+            info!(job_id = %job.id, project_id = %project_id, revision, services = services.len(), networks = networks.len(), exposures = exposure_routes.len(), duration_ms = reconciliation_started_at.elapsed().as_millis() as u64, "docker reconciliation completed");
+            Ok(jobs::JobExecutionResult {
+                status: "succeeded",
+                message: Some(format!("Docker revision {revision} reconciled")),
+            })
+        }
+        AgentJobSpec::CreateRuntime {
+            project_id,
+            runtime_id,
+            image,
+            cpu,
+            memory_mb,
+            disk_gb: _,
+        } => {
+            let workdir = agent_state_dir()?
+                .join("runtime")
+                .join(safe_path_segment(runtime_id));
+            fs::create_dir_all(&workdir)?;
+            let workspace = PreparedWorkspace { workdir };
+            let execution = ExecutionContext {
+                job_id: job.id.clone(),
+                attempt_id: job.id.clone(),
+                timeout_seconds: 3600,
+                log_tx: Some(log_tx.clone()),
+            };
+            let name = runtime_name(project_id, runtime_id);
+            let image = image.as_deref().unwrap_or("ubuntu:24.04");
+            let mut parts = image.splitn(2, ':');
+            let distribution = parts.next().unwrap_or("ubuntu");
+            let release = normalize_release(distribution, parts.next().unwrap_or("24.04"));
+            let architecture = lxc_arch();
+            info!(
+                job_id = %job.id,
+                runtime = %name,
+                image = %format!("{distribution}:{release}"),
+                architecture,
+                "reconciling lxc runtime"
+            );
+            let cpu = cpu.unwrap_or(2);
+            let memory_mb = memory_mb.unwrap_or(4096);
+            if !lxc::runtime_config_path(&name).exists() {
+                let create_args = vec![
+                    "-t".into(),
+                    "download".into(),
+                    "--".into(),
+                    "-d".into(),
+                    distribution.to_string(),
+                    "-r".into(),
+                    release.to_string(),
+                    "-a".into(),
+                    architecture.to_string(),
+                ];
+                let result = jobs::execute(
+                    &RunnerEnvironment::Host,
+                    &execution,
+                    &workspace,
+                    &lxc::runtime_command("lxc-create", &name, &create_args),
+                )
+                .await?;
+                if result.status == "failed" {
+                    return Ok(result);
+                }
+                lxc::configure_runtime(&name, cpu, memory_mb)?;
+            }
+
+            let start = jobs::execute(
+                &RunnerEnvironment::Host,
+                &execution,
+                &workspace,
+                &lxc::runtime_command(
+                    "lxc-start",
+                    &name,
+                    &[
+                        "--logfile".into(),
+                        lxc::runtime_log_path(&name).display().to_string(),
+                        "--logpriority".into(),
+                        "DEBUG".into(),
+                        "-d".into(),
+                    ],
+                ),
+            )
+            .await?;
+            if start.status == "failed" {
+                return Ok(start);
+            }
+            let ready = jobs::execute(
+                &RunnerEnvironment::Host,
+                &execution,
+                &workspace,
+                &lxc::runtime_command(
+                    "lxc-wait",
+                    &name,
+                    &["-s".into(), "RUNNING".into(), "-t".into(), "30".into()],
+                ),
+            )
+            .await?;
+            if ready.status == "failed" {
+                return Ok(ready);
+            }
+            let setup = "command -v docker >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io); install -d /etc/docker; printf '%s\\n' '{\"storage-driver\":\"vfs\"}' > /etc/docker/daemon.json; systemctl enable --now docker; systemctl restart docker; docker info >/dev/null";
+            jobs::execute(
+                &RunnerEnvironment::Host,
+                &execution,
+                &workspace,
+                &lxc::runtime_command(
+                    "lxc-attach",
+                    &name,
+                    &["--".into(), "bash".into(), "-lc".into(), setup.into()],
+                ),
+            )
+            .await
+        }
+        AgentJobSpec::StartRuntime {
+            project_id,
+            runtime_id,
+        } => {
+            let workspace = PreparedWorkspace {
+                workdir: agent_state_dir()?.join("runtime"),
+            };
+            let execution = ExecutionContext {
+                job_id: job.id.clone(),
+                attempt_id: job.id.clone(),
+                timeout_seconds: 1800,
+                log_tx: Some(log_tx.clone()),
+            };
+            runtime_lifecycle_command(
+                &execution,
+                &workspace,
+                &runtime_name(project_id, runtime_id),
+                "lxc-start -n",
+                false,
+            )
+            .await
+        }
+        AgentJobSpec::StopRuntime {
+            project_id,
+            runtime_id,
+        } => {
+            let workspace = PreparedWorkspace {
+                workdir: agent_state_dir()?.join("runtime"),
+            };
+            let execution = ExecutionContext {
+                job_id: job.id.clone(),
+                attempt_id: job.id.clone(),
+                timeout_seconds: 1800,
+                log_tx: Some(log_tx.clone()),
+            };
+            runtime_lifecycle_command(
+                &execution,
+                &workspace,
+                &runtime_name(project_id, runtime_id),
+                "lxc-stop -n",
+                false,
+            )
+            .await
+        }
+        AgentJobSpec::DestroyRuntime {
+            project_id,
+            runtime_id,
+        } => {
+            let workspace = PreparedWorkspace {
+                workdir: agent_state_dir()?.join("runtime"),
+            };
+            let execution = ExecutionContext {
+                job_id: job.id.clone(),
+                attempt_id: job.id.clone(),
+                timeout_seconds: 1800,
+                log_tx: Some(log_tx.clone()),
+            };
+            runtime_lifecycle_command(
+                &execution,
+                &workspace,
+                &runtime_name(project_id, runtime_id),
+                "lxc-destroy -n",
+                true,
+            )
+            .await
+        }
     }
+}
+
+fn runtime_name(project_id: &str, runtime_id: &str) -> String {
+    format!(
+        "statix-{}-{}",
+        safe_path_segment(project_id),
+        safe_path_segment(runtime_id)
+    )
+}
+
+fn exposure_port_state_path() -> Result<PathBuf> {
+    Ok(agent_state_dir()?
+        .join("network")
+        .join("exposure-ports.json"))
+}
+
+fn load_exposure_port_state() -> Result<ExposurePortState> {
+    let path = exposure_port_state_path()?;
+    if !path.exists() {
+        return Ok(ExposurePortState {
+            ports: BTreeMap::new(),
+        });
+    }
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read exposure port state {}", path.display()))?;
+    serde_json::from_str(&contents)
+        .with_context(|| format!("invalid exposure port state {}", path.display()))
+}
+
+fn save_exposure_port_state(state: &ExposurePortState) -> Result<()> {
+    let path = exposure_port_state_path()?;
+    let parent = path.parent().context("exposure port state has no parent")?;
+    fs::create_dir_all(parent)?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(state)?)?;
+    fs::rename(&temporary, &path)?;
+    Ok(())
+}
+
+fn exposure_port_range() -> Result<(u16, u16)> {
+    let start = env::var("STATIX_EXPOSURE_BACKEND_PORT_START")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(20_000);
+    let end = env::var("STATIX_EXPOSURE_BACKEND_PORT_END")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(29_999);
+    if start == 0 || start > end {
+        bail!("invalid exposure backend port range {start}-{end}");
+    }
+    Ok((start, end))
+}
+
+fn allocate_exposure_port(state: &mut ExposurePortState, key: &str) -> Result<u16> {
+    let (start, end) = exposure_port_range()?;
+    if let Some(port) = state.ports.get(key).copied() {
+        if (start..=end).contains(&port) {
+            return Ok(port);
+        }
+        state.ports.remove(key);
+    }
+    let used = state
+        .ports
+        .values()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    for port in start..=end {
+        if !used.contains(&port) {
+            state.ports.insert(key.to_owned(), port);
+            return Ok(port);
+        }
+    }
+    bail!("exposure backend port range {start}-{end} is exhausted")
+}
+
+fn json_port(value: Option<&Value>, field: &str, service_name: &str) -> Result<u16> {
+    let value = value
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("deployment {service_name} exposure has no {field}"))?;
+    u16::try_from(value)
+        .map_err(|_| anyhow!("deployment {service_name} exposure {field} is invalid"))
+}
+
+fn infer_declared_target_port(deployment: &Value, protocol: &str) -> Option<u16> {
+    let ports = deployment.get("ports")?.as_array()?;
+    let mut matches = ports.iter().filter_map(|port| {
+        let object = port.as_object()?;
+        let port_protocol = object
+            .get("protocol")
+            .and_then(Value::as_str)
+            .unwrap_or("tcp");
+        if port_protocol != protocol {
+            return None;
+        }
+        object
+            .get("container")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+    });
+    let first = matches.next()?;
+    (matches.next().is_none()).then_some(first)
+}
+
+fn host_has_ipv4(address: Ipv4Addr) -> bool {
+    std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains(&address.to_string()))
+        .unwrap_or(false)
+}
+
+async fn write_nginx_routes(routes: &[ExposureRoute]) -> Result<()> {
+    let directory = agent_state_dir()?.join("network");
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+    let path = directory.join("nginx-exposures.conf");
+    info!(route_count = routes.len(), path = %path.display(), "writing nginx exposure routes");
+    let mut config = String::new();
+    for route in routes {
+        debug!(service = %route.service_name, protocol = %route.protocol, bind_address = %route.bridge_ip, bridge_port = route.bridge_port, runtime_ip = %route.runtime_ip, backend_port = route.backend_port, target_port = route.target_port, "writing nginx exposure route");
+        config.push_str("server {\n");
+        config.push_str(&format!(
+            "    listen {}:{}",
+            route.bridge_ip, route.bridge_port
+        ));
+        if route.protocol == "udp" {
+            config.push_str(" udp");
+        }
+        config.push_str(";\n");
+        config.push_str(&format!(
+            "    proxy_pass {}:{};\n",
+            route.runtime_ip, route.backend_port
+        ));
+        config.push_str("    proxy_connect_timeout 5s;\n    proxy_timeout 1h;\n}\n\n");
+    }
+    fs::write(&path, config)?;
+    let helper = TokioCommand::new("sudo")
+        .args([
+            "-n",
+            "--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY",
+            "/usr/local/libexec/statix-agent-network",
+            "apply",
+        ])
+        .arg(&path)
+        .output()
+        .await?;
+    if !helper.status.success() {
+        error!(route_count = routes.len(), error = %String::from_utf8_lossy(&helper.stderr).trim(), "nginx exposure route apply failed");
+        bail!(
+            "nginx route apply failed: {}",
+            String::from_utf8_lossy(&helper.stderr).trim()
+        );
+    }
+    info!(route_count = routes.len(), "nginx exposure routes applied");
+    Ok(())
+}
+
+fn runtime_attach_command(runtime: &str, command_args: Vec<String>) -> Vec<String> {
+    let mut args = vec!["--".into()];
+    args.extend(command_args);
+    lxc::runtime_command("lxc-attach", runtime, &args)
+}
+
+async fn runtime_lifecycle_command(
+    execution: &ExecutionContext,
+    workspace: &PreparedWorkspace,
+    runtime_id: &str,
+    command: &str,
+    force: bool,
+) -> Result<jobs::JobExecutionResult> {
+    let name = safe_path_segment(runtime_id);
+    if command == "lxc-destroy -n" && !lxc::runtime_config_path(&name).exists() {
+        return Ok(jobs::JobExecutionResult {
+            status: "succeeded",
+            message: Some(format!("runtime {name} does not exist")),
+        });
+    }
+    let program = command
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow!("invalid runtime lifecycle command"))?;
+    let mut args = if force { vec!["-f".into()] } else { Vec::new() };
+    if program == "lxc-start" {
+        args.extend([
+            "--logfile".into(),
+            lxc::runtime_log_path(&name).display().to_string(),
+            "--logpriority".into(),
+            "DEBUG".into(),
+            "-d".into(),
+        ]);
+    }
+    let result = jobs::execute(
+        &RunnerEnvironment::Host,
+        execution,
+        workspace,
+        &lxc::runtime_command(program, &name, &args),
+    )
+    .await?;
+    if result.status == "failed" || program != "lxc-start" {
+        return Ok(result);
+    }
+
+    jobs::execute(
+        &RunnerEnvironment::Host,
+        execution,
+        workspace,
+        &lxc::runtime_command(
+            "lxc-wait",
+            &name,
+            &["-s".into(), "RUNNING".into(), "-t".into(), "30".into()],
+        ),
+    )
+    .await
 }
 
 fn project_systemd_command(project_id: &str, environment: &str, command: &[String]) -> Vec<String> {
@@ -914,7 +1737,7 @@ fn project_systemd_command(project_id: &str, environment: &str, command: &[Strin
     );
     let command = shell_join(command);
     let service = format!(
-        "[Unit]\nDescription=Statix project {project_id} ({environment})\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={user}\nWorkingDirectory=/home/{user}/workspace\nEnvironment=HOME=/home/{user}\nExecStart=/bin/bash -lc {command}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
+        "[Unit]\nDescription=Statix project {project_id} ({environment})\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={user}\nWorkingDirectory=/home/{user}/docker\nEnvironment=HOME=/home/{user}\nExecStart=/bin/bash -lc {command}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
         user = "statix",
         command = shell_escape(&command)
     );
@@ -964,8 +1787,10 @@ fn shell_env_key(key: &str) -> Option<String> {
 
 fn runner_environment_label(environment: &RunnerEnvironment) -> &'static str {
     match environment {
+        RunnerEnvironment::Host => "host",
         RunnerEnvironment::Microvm { .. } => "microvm",
         RunnerEnvironment::ProjectMicrovm { .. } => "project microvm",
+        RunnerEnvironment::Container { .. } => "container",
     }
 }
 
@@ -1007,7 +1832,7 @@ fn shell_escape(value: &str) -> String {
 }
 
 async fn prepare_job_workdir(job_id: &str, source: &JobSource) -> Result<PreparedWorkspace> {
-    log_verbose(&format!("preparing workdir for job {job_id}"));
+    debug!(job_id = %job_id, "preparing job workdir");
     match source {
         JobSource::GitCheckout {
             repo_url,
@@ -1015,9 +1840,7 @@ async fn prepare_job_workdir(job_id: &str, source: &JobSource) -> Result<Prepare
             commit_sha,
             subdir,
         } => {
-            log_verbose(&format!(
-                "job {job_id}: materializing git checkout from {repo_url}"
-            ));
+            debug!(job_id = %job_id, repository = %redact_url(repo_url), git_ref = %git_ref, "materializing git checkout");
             let checkout_root = materialize_git_checkout(repo_url, git_ref, commit_sha).await?;
             let workdir = match subdir
                 .as_deref()
@@ -1042,7 +1865,7 @@ async fn prepare_deployment_workdir(
     job: &AgentJob,
     bundle: &DeploymentBundle,
 ) -> Result<PreparedWorkspace> {
-    log_verbose(&format!("preparing deployment workdir for job {}", job.id));
+    debug!(job_id = %job.id, "preparing deployment workdir");
     let root = agent_state_dir()?.join("jobs").join("deployments");
     fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
 
@@ -1224,16 +2047,6 @@ async fn materialize_git_checkout(
     Ok(repo_dir)
 }
 
-fn verbose_logs_enabled() -> bool {
-    env_flag("STATIX_VERBOSE_LOGS")
-}
-
-fn log_verbose(message: &str) {
-    if verbose_logs_enabled() {
-        eprintln!("[statix-agent][debug] {message}");
-    }
-}
-
 fn truncate_for_log(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
@@ -1242,6 +2055,17 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
     let mut shortened = value.chars().take(max_chars).collect::<String>();
     shortened.push_str("...");
     shortened
+}
+
+fn redact_url(value: &str) -> String {
+    value
+        .split_once("://")
+        .map(|(scheme, rest)| {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            format!("{scheme}://{host}")
+        })
+        .unwrap_or_else(|| value.to_owned())
 }
 
 async fn run_git(args: &[&str], cwd: Option<&std::path::Path>) -> Result<()> {
@@ -1457,6 +2281,18 @@ mod tests {
                     ]
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn redact_url_removes_path_and_credentials() {
+        assert_eq!(
+            redact_url("https://user:secret@example.test/api?token=abc"),
+            "https://example.test"
+        );
+        assert_eq!(
+            redact_url("http://localhost:3001/api"),
+            "http://localhost:3001"
         );
     }
 }

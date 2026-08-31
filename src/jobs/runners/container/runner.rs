@@ -1,10 +1,11 @@
 use std::fs;
 
 use anyhow::{Context, Result, bail};
+use tracing::info;
 
 use crate::{
     config::agent_state_dir,
-    jobs::{ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner},
+    jobs::{CommandSpec, ExecutionContext, JobExecutionResult, PreparedWorkspace, Runner},
 };
 
 use super::{
@@ -39,12 +40,12 @@ impl Runner for ContainerRunner {
         &self,
         ctx: &ExecutionContext,
         workspace: &PreparedWorkspace,
-        command: &[String],
+        command: &CommandSpec,
     ) -> Result<JobExecutionResult> {
         if ctx.timeout_seconds == 0 || ctx.timeout_seconds > 3600 {
             bail!("run timeoutSeconds must be between 1 and 3600");
         }
-        if command.is_empty() {
+        if command.argv.is_empty() {
             bail!("run command must contain at least one token");
         }
 
@@ -59,22 +60,9 @@ impl Runner for ContainerRunner {
         fs::create_dir_all(&runtime_root)
             .with_context(|| format!("failed to create {}", runtime_root.display()))?;
 
-        eprintln!(
-            "[statix-agent] job {}: preparing lxc container {} from {}",
-            ctx.job_id, container_name, self.image
-        );
-        eprintln!(
-            "[statix-agent] job {}: requested container limits: {} cpu(s), {} MiB memory",
-            ctx.job_id, cpu, memory_mb
-        );
-
+        info!(job_id = %ctx.job_id, container = %container_name, image = %self.image, "preparing privileged lxc container");
         let workspace_tar = runtime_root.join(WORKSPACE_ARCHIVE);
         create_workspace_archive(&workspace_tar, &workspace.workdir).await?;
-        eprintln!(
-            "[statix-agent] job {}: archived workspace {}",
-            ctx.job_id,
-            workspace.workdir.display()
-        );
 
         let mut container = LxcContainer::create(
             container_name.clone(),
@@ -104,12 +92,8 @@ impl Runner for ContainerRunner {
         }
         .await;
 
-        eprintln!(
-            "[statix-agent] job {}: destroying lxc container {}",
-            ctx.job_id, container_name
-        );
+        info!(job_id = %ctx.job_id, container = %container_name, "destroying lxc container");
         container.destroy().await;
-
         result
     }
 }

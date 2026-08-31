@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Root-only adapter for the small set of LXC operations needed by statix-agent.
+# The caller is unprivileged; validation here is intentionally strict because
+# this file is executable through a sudoers rule.
+readonly STATE_ROOT="${STATIX_AGENT_STATE_DIR:-${STATE_DIRECTORY:-/var/lib/statix-agent}}"
+readonly STORAGE_ROOT="$STATE_ROOT/lxc/containers"
+export HOME="$STATE_ROOT/lxc"
+export XDG_CACHE_HOME="$HOME/.cache"
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_DATA_HOME="$HOME/.local/share"
+
+fail() {
+  printf 'statix-agent-lxc: %s\n' "$*" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || fail "missing operation"
+operation="$1"
+shift
+case "$operation" in
+  lxc-create|lxc-start|lxc-wait|lxc-attach|lxc-info|lxc-stop|lxc-destroy) ;;
+  *) fail "operation is not allowed: $operation" ;;
+esac
+
+name=""
+path=""
+for ((index = 1; index <= $#; index++)); do
+  arg="${!index}"
+  case "$arg" in
+    -n)
+      next=$((index + 1)); (( next <= $# )) || fail "-n requires a value"
+      name="${!next}"
+      [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$ ]] || fail "invalid container name"
+      ;;
+    -P)
+      next=$((index + 1)); (( next <= $# )) || fail "-P requires a value"
+      path="${!next}"
+      [[ "$path" == "$STORAGE_ROOT" ]] || fail "invalid LXC storage path"
+      ;;
+  esac
+done
+
+[[ -n "$name" ]] || fail "container name is required"
+[[ -n "$path" ]] || fail "LXC storage path is required"
+install -d -m 0755 "$STORAGE_ROOT" "$HOME/.cache" "$HOME/.config" "$HOME/.local/share"
+
+case "$operation" in
+  lxc-attach)
+    found_separator=0
+    for arg in "$@"; do
+      [[ "$arg" == "--" ]] && found_separator=1
+    done
+    (( found_separator == 1 )) || fail "attach requires -- command separator"
+    ;;
+  lxc-create)
+    [[ " $* " == *" -t download "* ]] || fail "create must use the download template"
+    ;;
+esac
+
+exec "/usr/bin/$operation" "$@"

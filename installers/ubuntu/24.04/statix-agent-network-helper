@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly STATE_ROOT="${STATIX_AGENT_STATE_DIR:-${STATE_DIRECTORY:-/var/lib/statix-agent}}"
+readonly DESTINATION="/etc/nginx/streams-enabled/statix-exposures.conf"
+
+fail() {
+  printf 'statix-agent-network: %s\n' "$*" >&2
+  exit 2
+}
+
+[[ "${1:-}" == apply ]] || fail "only apply is allowed"
+source_path="${2:-}"
+[[ -n "$source_path" && "$source_path" == "$STATE_ROOT"/* && -f "$source_path" ]] || fail "invalid configuration path"
+
+install -d -m 0755 "$(dirname "$DESTINATION")"
+temporary="${DESTINATION}.tmp"
+backup="${DESTINATION}.bak"
+had_previous=0
+if [[ -f "$DESTINATION" ]]; then
+  cp "$DESTINATION" "$backup"
+  had_previous=1
+fi
+install -m 0644 "$source_path" "$temporary"
+mv "$temporary" "$DESTINATION"
+
+if ! nginx -t >/tmp/statix-agent-nginx-test.log 2>&1; then
+  if (( had_previous )); then mv "$backup" "$DESTINATION"; else rm -f "$DESTINATION"; fi
+  cat /tmp/statix-agent-nginx-test.log >&2
+  rm -f /tmp/statix-agent-nginx-test.log
+  exit 1
+fi
+rm -f "$backup" /tmp/statix-agent-nginx-test.log
+nginx -s reload

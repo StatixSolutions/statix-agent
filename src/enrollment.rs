@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
+use tracing::{info, warn};
 
 use crate::{
     config::{
@@ -120,6 +121,7 @@ fn check_dependencies() -> Result<()> {
 }
 
 pub async fn run_login(login_config: LoginConfig, options: LoginOptions) -> Result<()> {
+    info!(api_url = %redact_url(&login_config.api_base_url), "starting node enrollment");
     check_dependencies()?;
 
     let client = Client::new();
@@ -181,6 +183,7 @@ pub async fn run_login(login_config: LoginConfig, options: LoginOptions) -> Resu
     println!("Code: {}", started.user_code);
     println!("Expires: {}", started.expires_at);
     println!("Waiting for approval...");
+    info!(expires_at = %started.expires_at, "waiting for node enrollment approval");
 
     loop {
         let poll_response = client
@@ -271,10 +274,7 @@ pub async fn run_login(login_config: LoginConfig, options: LoginOptions) -> Resu
                         .text()
                         .await
                         .unwrap_or_else(|_| "unable to read finalize response".to_owned());
-                    eprintln!(
-                        "[statix-agent] warning: enrollment finished locally but finalize failed: {}",
-                        text
-                    );
+                    warn!(response = %truncate_for_log(&text, 240), "enrollment finished locally but finalize failed");
                 }
 
                 println!("Node enrolled successfully.");
@@ -292,4 +292,22 @@ pub async fn run_login(login_config: LoginConfig, options: LoginOptions) -> Resu
             }
         }
     }
+}
+
+fn redact_url(value: &str) -> String {
+    value
+        .split_once("://")
+        .map(|(scheme, rest)| {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            format!("{scheme}://{host}")
+        })
+        .unwrap_or_else(|| value.to_owned())
+}
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    format!("{}...", value.chars().take(max_chars).collect::<String>())
 }
