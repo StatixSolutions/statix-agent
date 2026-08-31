@@ -1254,7 +1254,7 @@ async fn execute_job(
             if ready.status == "failed" {
                 return Ok(ready);
             }
-            let setup = "command -v docker >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io); systemctl enable --now docker";
+            let setup = "command -v docker >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io); install -d /etc/docker; printf '%s\\n' '{\"storage-driver\":\"vfs\"}' > /etc/docker/daemon.json; systemctl enable --now docker; systemctl restart docker; docker info >/dev/null";
             jobs::execute(
                 &RunnerEnvironment::Host,
                 &execution,
@@ -1344,7 +1344,9 @@ fn runtime_name(project_id: &str, runtime_id: &str) -> String {
     )
 }
 
-fn runtime_attach_command(runtime: &str, args: Vec<String>) -> Vec<String> {
+fn runtime_attach_command(runtime: &str, command_args: Vec<String>) -> Vec<String> {
+    let mut args = vec!["--".into()];
+    args.extend(command_args);
     lxc::runtime_command("lxc-attach", runtime, &args)
 }
 
