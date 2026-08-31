@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     io::Write,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     process::{Command as StdCommand, Output, Stdio},
 };
@@ -697,6 +698,28 @@ pub(crate) fn runtime_command(program: &str, name: &str, args: &[String]) -> Vec
     ];
     command.extend(args.iter().cloned());
     command
+}
+
+pub(crate) async fn runtime_ipv4(name: &str) -> Result<Ipv4Addr> {
+    let output = lxc_command("lxc-info")
+        .arg("-n")
+        .arg(name)
+        .arg("-P")
+        .arg(lxc_storage_path())
+        .arg("-iH")
+        .output()
+        .await
+        .with_context(|| format!("failed to inspect lxc runtime {name}"))?;
+    if !output.status.success() {
+        bail!(
+            "failed to resolve IPv4 address for lxc runtime {name}: {}",
+            summarize_raw_command_output(&output.stdout, &output.stderr)
+        );
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .find_map(|value| value.parse().ok())
+        .ok_or_else(|| anyhow!("lxc runtime {name} has no IPv4 address"))
 }
 
 pub(crate) fn configure_runtime(name: &str, cpu: u32, memory_mb: u32) -> Result<()> {

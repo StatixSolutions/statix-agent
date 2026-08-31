@@ -1,4 +1,4 @@
-use std::process::Stdio;
+use std::{process::Stdio, time::Instant};
 
 use anyhow::{Result, anyhow, bail};
 use tokio::{
@@ -29,6 +29,7 @@ impl Runner for HostRunner {
         if command.argv.is_empty() {
             bail!("run command must contain at least one token");
         }
+        let started_at = Instant::now();
 
         let mut process = TokioCommand::new(&command.argv[0]);
         process.args(&command.argv[1..]);
@@ -97,17 +98,25 @@ impl Runner for HostRunner {
             }
         };
 
-        debug!(job_id = %ctx.job_id, attempt_id = %ctx.attempt_id, command = %command.argv[0], "host command completed");
+        let duration_ms = started_at.elapsed().as_millis() as u64;
+        debug!(job_id = %ctx.job_id, attempt_id = %ctx.attempt_id, command = %command.argv[0], duration_ms, "host command completed");
 
         let message = summarize_command_output(&workspace.workdir, &stdout, &stderr);
         if status.success() {
-            info!(job_id = %ctx.job_id, status = "succeeded", "host command finished");
+            info!(job_id = %ctx.job_id, command = %command.argv[0], status = "succeeded", duration_ms, "host command finished");
             Ok(JobExecutionResult {
                 status: "succeeded",
                 message: Some(message),
             })
         } else {
-            warn!(job_id = %ctx.job_id, status = "failed", exit_status = %status, "host command failed");
+            let expected_cleanup = command.argv.iter().any(|arg| arg == "docker")
+                && command.argv.iter().any(|arg| arg == "rm")
+                && command.argv.iter().any(|arg| arg == "-f");
+            if expected_cleanup {
+                debug!(job_id = %ctx.job_id, command = %command.argv[0], status = "failed", exit_status = %status, duration_ms, "expected cleanup command did not find an existing container");
+            } else {
+                warn!(job_id = %ctx.job_id, command = %command.argv[0], status = "failed", exit_status = %status, duration_ms, output = %message, "host command failed");
+            }
             Ok(JobExecutionResult {
                 status: "failed",
                 message: Some(message),

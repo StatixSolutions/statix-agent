@@ -20,7 +20,7 @@ fail() {
 operation="$1"
 shift
 case "$operation" in
-  lxc-create|lxc-start|lxc-wait|lxc-attach|lxc-stop|lxc-destroy) ;;
+  lxc-create|lxc-start|lxc-wait|lxc-attach|lxc-info|lxc-stop|lxc-destroy) ;;
   *) fail "operation is not allowed: $operation" ;;
 esac
 

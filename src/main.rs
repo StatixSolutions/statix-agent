@@ -9,8 +9,9 @@ use std::{
     collections::BTreeMap,
     collections::VecDeque,
     collections::hash_map::DefaultHasher,
-    fs,
+    env, fs,
     hash::{Hash, Hasher},
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -257,6 +258,22 @@ struct DeploymentSetup {
     run: Vec<String>,
     #[serde(default)]
     exports: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExposurePortState {
+    ports: BTreeMap<String, u16>,
+}
+
+#[derive(Debug, Clone)]
+struct ExposureRoute {
+    service_name: String,
+    bridge_ip: Ipv4Addr,
+    bridge_port: u16,
+    backend_port: u16,
+    target_port: u16,
+    protocol: String,
+    runtime_ip: Ipv4Addr,
 }
 
 enum SessionOutcome {
@@ -989,6 +1006,7 @@ async fn execute_job(
             networks,
             services,
         } => {
+            let reconciliation_started_at = Instant::now();
             let workdir = agent_state_dir()?
                 .join("deployments")
                 .join(project_id)
@@ -1003,6 +1021,64 @@ async fn execute_job(
                 log_tx: Some(log_tx),
             };
             let runtime_name = runtime_name(project_id, runtime_id);
+            info!(job_id = %job.id, project_id = %project_id, runtime_id = %runtime_id, revision, runtime = %runtime_name, networks = networks.len(), services = services.len(), "starting docker reconciliation");
+            let runtime_ip = lxc::runtime_ipv4(&runtime_name).await?;
+            info!(job_id = %job.id, runtime = %runtime_name, runtime_ip = %runtime_ip, "resolved lxc runtime network");
+            let mut port_state = load_exposure_port_state()?;
+            let mut exposure_routes = Vec::new();
+            let mut active_exposure_keys = std::collections::HashSet::new();
+            for (service_name, deployment) in services.iter() {
+                let Some(expose) = deployment.get("expose").and_then(Value::as_object) else {
+                    continue;
+                };
+                let protocol = expose
+                    .get("protocol")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tcp")
+                    .to_ascii_lowercase();
+                if protocol != "tcp" && protocol != "udp" {
+                    bail!("deployment {service_name} exposure protocol must be tcp or udp");
+                }
+                let key = format!("{project_id}/{service_name}/{protocol}");
+                let backend_port = allocate_exposure_port(&mut port_state, &key)?;
+                let bridge_ip = expose
+                    .get("bridgeIp")
+                    .and_then(Value::as_str)
+                    .unwrap_or("0.0.0.0")
+                    .parse::<Ipv4Addr>()
+                    .map_err(|_| {
+                        anyhow!("deployment {service_name} exposure bridgeIp is not IPv4")
+                    })?;
+                if bridge_ip != Ipv4Addr::UNSPECIFIED && !host_has_ipv4(bridge_ip) {
+                    bail!("exposure bind IP {bridge_ip} is not assigned to this node");
+                }
+                let bridge_port = expose
+                    .get("bridgePort")
+                    .map(|value| json_port(Some(value), "bridgePort", service_name))
+                    .transpose()?
+                    .unwrap_or(backend_port);
+                let target_port = expose
+                    .get("targetPort")
+                    .map(|value| json_port(Some(value), "targetPort", service_name))
+                    .transpose()?
+                    .or_else(|| infer_declared_target_port(deployment, &protocol))
+                    .ok_or_else(|| anyhow!("deployment {service_name} exposure needs targetPort; declare exactly one matching service port or set targetPort"))?;
+                info!(job_id = %job.id, service = %service_name, protocol = %protocol, runtime_ip = %runtime_ip, target_port, bind_address = %bridge_ip, bridge_port, backend_port, "resolved service exposure");
+                active_exposure_keys.insert(key);
+                exposure_routes.push(ExposureRoute {
+                    service_name: service_name.clone(),
+                    bridge_ip,
+                    bridge_port,
+                    backend_port,
+                    target_port,
+                    protocol,
+                    runtime_ip,
+                });
+            }
+            let project_prefix = format!("{project_id}/");
+            port_state.ports.retain(|key, _| {
+                !key.starts_with(&project_prefix) || active_exposure_keys.contains(key)
+            });
             for name in networks.keys() {
                 let docker_name = format!(
                     "statix-{}-{}",
@@ -1025,6 +1101,7 @@ async fn execute_job(
                 )
                 .await?;
                 if inspect.status == "succeeded" {
+                    info!(job_id = %job.id, network = %docker_name, "reusing docker network");
                     continue;
                 }
                 let mut create_args = vec![
@@ -1043,7 +1120,7 @@ async fn execute_job(
                 {
                     create_args.push("--internal".into());
                 }
-                create_args.push(docker_name);
+                create_args.push(docker_name.clone());
                 let result = jobs::execute(
                     &RunnerEnvironment::Host,
                     &execution,
@@ -1054,6 +1131,12 @@ async fn execute_job(
                 if result.status == "failed" {
                     return Ok(result);
                 }
+                let internal = networks
+                    .get(name)
+                    .and_then(|network| network.get("internal"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                info!(job_id = %job.id, network = %docker_name, internal, "created docker network");
             }
             for (name, deployment) in services {
                 let image = deployment
@@ -1065,6 +1148,10 @@ async fn execute_job(
                     safe_path_segment(project_id),
                     safe_path_segment(name)
                 );
+                let exposure = exposure_routes
+                    .iter()
+                    .find(|route| route.service_name == *name);
+                info!(job_id = %job.id, service = %name, container = %node_name, image = %image, runtime = %runtime_name, "starting docker service");
                 let _ = jobs::execute(
                     &RunnerEnvironment::Host,
                     &execution,
@@ -1080,7 +1167,7 @@ async fn execute_job(
                     "run".into(),
                     "-d".into(),
                     "--name".into(),
-                    node_name,
+                    node_name.clone(),
                     "--label".into(),
                     format!("com.statix.project={project_id}"),
                     "--label".into(),
@@ -1088,6 +1175,21 @@ async fn execute_job(
                 ];
                 if let Some(restart) = deployment.get("restart").and_then(Value::as_str) {
                     args.extend(["--restart".into(), restart.to_string()]);
+                }
+                if let Some(route) = exposure {
+                    args.extend([
+                        "-p".into(),
+                        format!(
+                            "{}:{}{}",
+                            route.backend_port,
+                            route.target_port,
+                            if route.protocol == "udp" {
+                                "/udp"
+                            } else {
+                                "/tcp"
+                            }
+                        ),
+                    ]);
                 }
                 if let Some(env) = deployment.get("env").and_then(Value::as_object) {
                     for (key, value) in env {
@@ -1124,12 +1226,13 @@ async fn execute_job(
                             safe_path_segment(project_id),
                             safe_path_segment(network)
                         );
-                        if index == 0 {
+                        if index == 0 && exposure.is_none() {
                             args.extend(["--network".into(), network_name]);
-                        } else {
-                            args.extend(["--network-alias".into(), name.to_string()]);
                         }
                     }
+                }
+                if exposure.is_some() {
+                    args.extend(["--network".into(), "bridge".into()]);
                 }
                 if let Some(entrypoint) = deployment.get("entrypoint").and_then(Value::as_array) {
                     args.extend([
@@ -1155,7 +1258,81 @@ async fn execute_job(
                 if result.status == "failed" {
                     return Ok(result);
                 }
+                if exposure.is_some() {
+                    if let Some(networks) = deployment.get("networks").and_then(Value::as_array) {
+                        for network in networks.iter().filter_map(Value::as_str) {
+                            let network_name = format!(
+                                "statix-{}-{}",
+                                safe_path_segment(project_id),
+                                safe_path_segment(network)
+                            );
+                            let connect = jobs::execute(
+                                &RunnerEnvironment::Host,
+                                &execution,
+                                &workspace,
+                                &runtime_attach_command(
+                                    &runtime_name,
+                                    vec![
+                                        "docker".into(),
+                                        "network".into(),
+                                        "connect".into(),
+                                        "--alias".into(),
+                                        name.to_string(),
+                                        network_name.clone(),
+                                        node_name.clone(),
+                                    ],
+                                ),
+                            )
+                            .await?;
+                            if connect.status == "failed" {
+                                return Ok(connect);
+                            }
+                            debug!(job_id = %job.id, service = %name, network = %network_name, "connected exposed service to project network");
+                        }
+                    }
+                }
+                if let Some(route) = exposure_routes
+                    .iter()
+                    .find(|route| route.service_name == *name)
+                {
+                    let port_check = jobs::execute(
+                        &RunnerEnvironment::Host,
+                        &execution,
+                        &workspace,
+                        &runtime_attach_command(
+                            &runtime_name,
+                            vec![
+                                "docker".into(),
+                                "inspect".into(),
+                                "-f".into(),
+                                "{{if .NetworkSettings.Ports}}{{json .NetworkSettings.Ports}}{{else}}null{{end}}".into(),
+                                node_name.clone(),
+                            ],
+                        ),
+                    )
+                    .await?;
+                    if port_check.status == "failed" {
+                        return Ok(port_check);
+                    }
+                    if port_check
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.trim_end().ends_with("null"))
+                    {
+                        bail!(
+                            "docker service {name} started without an active published port {}:{}",
+                            route.bridge_ip,
+                            route.bridge_port
+                        );
+                    }
+                    info!(job_id = %job.id, service = %name, container = %node_name, bind_address = %route.bridge_ip, bridge_port = route.bridge_port, runtime_ip = %route.runtime_ip, backend_port = route.backend_port, target_port = route.target_port, protocol = %route.protocol, "docker service started with exposure");
+                } else {
+                    info!(job_id = %job.id, service = %name, container = %node_name, "docker service started without exposure");
+                }
             }
+            write_nginx_routes(&exposure_routes).await?;
+            save_exposure_port_state(&port_state)?;
+            info!(job_id = %job.id, project_id = %project_id, revision, services = services.len(), networks = networks.len(), exposures = exposure_routes.len(), duration_ms = reconciliation_started_at.elapsed().as_millis() as u64, "docker reconciliation completed");
             Ok(jobs::JobExecutionResult {
                 status: "succeeded",
                 message: Some(format!("Docker revision {revision} reconciled")),
@@ -1342,6 +1519,156 @@ fn runtime_name(project_id: &str, runtime_id: &str) -> String {
         safe_path_segment(project_id),
         safe_path_segment(runtime_id)
     )
+}
+
+fn exposure_port_state_path() -> Result<PathBuf> {
+    Ok(agent_state_dir()?
+        .join("network")
+        .join("exposure-ports.json"))
+}
+
+fn load_exposure_port_state() -> Result<ExposurePortState> {
+    let path = exposure_port_state_path()?;
+    if !path.exists() {
+        return Ok(ExposurePortState {
+            ports: BTreeMap::new(),
+        });
+    }
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read exposure port state {}", path.display()))?;
+    serde_json::from_str(&contents)
+        .with_context(|| format!("invalid exposure port state {}", path.display()))
+}
+
+fn save_exposure_port_state(state: &ExposurePortState) -> Result<()> {
+    let path = exposure_port_state_path()?;
+    let parent = path.parent().context("exposure port state has no parent")?;
+    fs::create_dir_all(parent)?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(state)?)?;
+    fs::rename(&temporary, &path)?;
+    Ok(())
+}
+
+fn exposure_port_range() -> Result<(u16, u16)> {
+    let start = env::var("STATIX_EXPOSURE_BACKEND_PORT_START")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(20_000);
+    let end = env::var("STATIX_EXPOSURE_BACKEND_PORT_END")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(29_999);
+    if start == 0 || start > end {
+        bail!("invalid exposure backend port range {start}-{end}");
+    }
+    Ok((start, end))
+}
+
+fn allocate_exposure_port(state: &mut ExposurePortState, key: &str) -> Result<u16> {
+    let (start, end) = exposure_port_range()?;
+    if let Some(port) = state.ports.get(key).copied() {
+        if (start..=end).contains(&port) {
+            return Ok(port);
+        }
+        state.ports.remove(key);
+    }
+    let used = state
+        .ports
+        .values()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    for port in start..=end {
+        if !used.contains(&port) {
+            state.ports.insert(key.to_owned(), port);
+            return Ok(port);
+        }
+    }
+    bail!("exposure backend port range {start}-{end} is exhausted")
+}
+
+fn json_port(value: Option<&Value>, field: &str, service_name: &str) -> Result<u16> {
+    let value = value
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("deployment {service_name} exposure has no {field}"))?;
+    u16::try_from(value)
+        .map_err(|_| anyhow!("deployment {service_name} exposure {field} is invalid"))
+}
+
+fn infer_declared_target_port(deployment: &Value, protocol: &str) -> Option<u16> {
+    let ports = deployment.get("ports")?.as_array()?;
+    let mut matches = ports.iter().filter_map(|port| {
+        let object = port.as_object()?;
+        let port_protocol = object
+            .get("protocol")
+            .and_then(Value::as_str)
+            .unwrap_or("tcp");
+        if port_protocol != protocol {
+            return None;
+        }
+        object
+            .get("container")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+    });
+    let first = matches.next()?;
+    (matches.next().is_none()).then_some(first)
+}
+
+fn host_has_ipv4(address: Ipv4Addr) -> bool {
+    std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains(&address.to_string()))
+        .unwrap_or(false)
+}
+
+async fn write_nginx_routes(routes: &[ExposureRoute]) -> Result<()> {
+    let directory = agent_state_dir()?.join("network");
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+    let path = directory.join("nginx-exposures.conf");
+    info!(route_count = routes.len(), path = %path.display(), "writing nginx exposure routes");
+    let mut config = String::new();
+    for route in routes {
+        debug!(service = %route.service_name, protocol = %route.protocol, bind_address = %route.bridge_ip, bridge_port = route.bridge_port, runtime_ip = %route.runtime_ip, backend_port = route.backend_port, target_port = route.target_port, "writing nginx exposure route");
+        config.push_str("server {\n");
+        config.push_str(&format!(
+            "    listen {}:{}",
+            route.bridge_ip, route.bridge_port
+        ));
+        if route.protocol == "udp" {
+            config.push_str(" udp");
+        }
+        config.push_str(";\n");
+        config.push_str(&format!(
+            "    proxy_pass {}:{};\n",
+            route.runtime_ip, route.backend_port
+        ));
+        config.push_str("    proxy_connect_timeout 5s;\n    proxy_timeout 1h;\n}\n\n");
+    }
+    fs::write(&path, config)?;
+    let helper = TokioCommand::new("sudo")
+        .args([
+            "-n",
+            "--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY",
+            "/usr/local/libexec/statix-agent-network",
+            "apply",
+        ])
+        .arg(&path)
+        .output()
+        .await?;
+    if !helper.status.success() {
+        error!(route_count = routes.len(), error = %String::from_utf8_lossy(&helper.stderr).trim(), "nginx exposure route apply failed");
+        bail!(
+            "nginx route apply failed: {}",
+            String::from_utf8_lossy(&helper.stderr).trim()
+        );
+    }
+    info!(route_count = routes.len(), "nginx exposure routes applied");
+    Ok(())
 }
 
 fn runtime_attach_command(runtime: &str, command_args: Vec<String>) -> Vec<String> {
