@@ -6,6 +6,7 @@ readonly SERVICE_USER="statix-agent"
 readonly SERVICE_GROUP="statix-agent"
 readonly DEFAULT_DOWNLOAD_BASE_URL="https://github.com/StatixSolutions/statix-agent/releases/latest/download"
 readonly UPDATE_SCRIPT_ASSET_NAME="statix-agent-update-archlinux.sh"
+readonly DEPENDENCIES_ASSET_NAME="statix-agent-dependencies.sh"
 
 DOWNLOAD_BASE_URL="${STATIX_DOWNLOAD_BASE_URL:-$DEFAULT_DOWNLOAD_BASE_URL}"
 INSTALL_DIR="${STATIX_INSTALL_DIR:-/usr/local/bin}"
@@ -20,6 +21,8 @@ UPDATE_SERVICE_PATH="${STATIX_UPDATE_SERVICE_PATH:-/etc/systemd/system/$SERVICE_
 SUDOERS_PATH="${STATIX_AGENT_SUDOERS_PATH:-/etc/sudoers.d/$SERVICE_NAME}"
 LXC_HELPER_PATH="${STATIX_LXC_HELPER_PATH:-/usr/local/libexec/statix-agent-lxc}"
 LXC_HELPER_URL="${STATIX_LXC_HELPER_URL:-$DOWNLOAD_BASE_URL/statix-agent-lxc-helper}"
+DEPENDENCIES_PATH="${STATIX_DEPENDENCIES_PATH:-/usr/local/lib/statix/statix-agent-dependencies.sh}"
+DEPENDENCIES_URL="${STATIX_DEPENDENCIES_URL:-$DOWNLOAD_BASE_URL/$DEPENDENCIES_ASSET_NAME}"
 API_BASE_URL="${STATIX_API_BASE_URL:-}"
 NODE_NAME="${STATIX_NODE_NAME:-}"
 SKIP_LOGIN="${STATIX_SKIP_LOGIN:-0}"
@@ -81,17 +84,18 @@ check_platform() {
 install_dependencies() {
   command -v pacman >/dev/null 2>&1 || fail "pacman is required"
 
-  log "installing dependencies"
-  pacman -Sy --needed --noconfirm \
-    ca-certificates \
-    curl \
-    iproute2 \
-    lxc \
-    xz \
-    pciutils \
-    sudo \
-    wireguard-tools \
-    wget
+  log "installing dependency-manager bootstrap"
+  pacman -Sy --needed --noconfirm curl
+}
+
+install_dependency_helper() {
+  local temporary
+  temporary="$(mktemp)"
+  download_file "$DEPENDENCIES_URL" "$temporary" || fail "failed to download dependency helper"
+  install -d -m 0755 "$(dirname "$DEPENDENCIES_PATH")"
+  install -m 0755 "$temporary" "$DEPENDENCIES_PATH"
+  rm -f "$temporary"
+  "$DEPENDENCIES_PATH" --install
 }
 
 download_file() {
@@ -278,6 +282,7 @@ main() {
   normalize_download_base_url
   check_platform
   install_dependencies
+  install_dependency_helper
   ensure_service_account
   install_agent_binary
   install_version_file

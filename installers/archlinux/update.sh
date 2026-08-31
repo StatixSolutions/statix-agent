@@ -3,11 +3,13 @@ set -Eeuo pipefail
 
 readonly SERVICE_NAME="statix-agent"
 readonly DEFAULT_DOWNLOAD_BASE_URL="https://github.com/StatixSolutions/statix-agent/releases/latest/download"
+readonly DEPENDENCIES_ASSET_NAME="statix-agent-dependencies.sh"
 
 DOWNLOAD_BASE_URL="${STATIX_DOWNLOAD_BASE_URL:-$DEFAULT_DOWNLOAD_BASE_URL}"
 BINARY_PATH="${STATIX_BINARY_PATH:-/usr/local/bin/statix-agent}"
 VERSION_FILE="${STATIX_VERSION_FILE:-/opt/statix/version.json}"
 SERVICE_PATH="${STATIX_SERVICE_PATH:-/etc/systemd/system/$SERVICE_NAME.service}"
+DEPENDENCIES_PATH="${STATIX_DEPENDENCIES_PATH:-/usr/local/lib/statix/statix-agent-dependencies.sh}"
 
 log() {
   printf '[statix-updater] %s\n' "$*"
@@ -64,13 +66,42 @@ verify_sha256() {
   fi
 }
 
+repair_dependencies() {
+  local dependencies_url temporary
+  dependencies_url="${STATIX_DEPENDENCIES_URL:-$DOWNLOAD_BASE_URL/$DEPENDENCIES_ASSET_NAME}"
+  temporary="$(mktemp)"
+  log "downloading dependency helper from $dependencies_url"
+  download_file "$dependencies_url" "$temporary" || fail "failed to download dependency helper"
+  install -d -m 0755 "$(dirname "$DEPENDENCIES_PATH")"
+  install -m 0755 "$temporary" "$DEPENDENCIES_PATH"
+  rm -f "$temporary"
+  "$DEPENDENCIES_PATH" --install
+}
+
+bootstrap_curl() {
+  if command -v curl >/dev/null 2>&1; then
+    return
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends curl
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --needed --noconfirm curl
+  else
+    fail "curl is missing and no supported package manager was found"
+  fi
+}
+
 main() {
   [[ "${EUID}" -eq 0 ]] || fail "updater must run as root"
-  command -v curl >/dev/null 2>&1 || fail "curl is required"
   command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
   command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 
   DOWNLOAD_BASE_URL="${DOWNLOAD_BASE_URL%/}"
+  bootstrap_curl
+  repair_dependencies
   local arch binary_url temporary backup version_url version_tmp
   arch="$(detect_arch)"
   binary_url="${STATIX_AGENT_BINARY_URL:-$DOWNLOAD_BASE_URL/statix-agent-linux-$arch}"

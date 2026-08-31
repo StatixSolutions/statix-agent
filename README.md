@@ -14,6 +14,7 @@ The expected public release assets are:
 - `statix-agent-linux-amd64`
 - `statix-agent-linux-arm64`
 - matching `.sha256` files
+- `statix-agent-dependencies.sh` and its `.sha256` file
 - distro-specific installer assets for supported distributions, for example:
 - `statix-agent-install-ubuntu-24.04.sh`
 - `statix-agent-update-ubuntu-24.04.sh`

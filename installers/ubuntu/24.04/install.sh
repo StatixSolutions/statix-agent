@@ -6,6 +6,7 @@ readonly SERVICE_USER="statix-agent"
 readonly SERVICE_GROUP="statix-agent"
 readonly DEFAULT_DOWNLOAD_BASE_URL="https://github.com/StatixSolutions/statix-agent/releases/latest/download"
 readonly UPDATE_SCRIPT_ASSET_NAME="statix-agent-update-ubuntu-24.04.sh"
+readonly DEPENDENCIES_ASSET_NAME="statix-agent-dependencies.sh"
 
 DOWNLOAD_BASE_URL="${STATIX_DOWNLOAD_BASE_URL:-$DEFAULT_DOWNLOAD_BASE_URL}"
 INSTALL_DIR="${STATIX_INSTALL_DIR:-/usr/local/bin}"
@@ -20,6 +21,8 @@ UPDATE_SERVICE_PATH="${STATIX_UPDATE_SERVICE_PATH:-/etc/systemd/system/$SERVICE_
 SUDOERS_PATH="${STATIX_AGENT_SUDOERS_PATH:-/etc/sudoers.d/$SERVICE_NAME}"
 LXC_HELPER_PATH="${STATIX_LXC_HELPER_PATH:-/usr/local/libexec/statix-agent-lxc}"
 LXC_HELPER_URL="${STATIX_LXC_HELPER_URL:-$DOWNLOAD_BASE_URL/statix-agent-lxc-helper}"
+DEPENDENCIES_PATH="${STATIX_DEPENDENCIES_PATH:-/usr/local/lib/statix/statix-agent-dependencies.sh}"
+DEPENDENCIES_URL="${STATIX_DEPENDENCIES_URL:-$DOWNLOAD_BASE_URL/$DEPENDENCIES_ASSET_NAME}"
 STATE_DIR="${STATIX_AGENT_STATE_DIR:-/var/lib/statix-agent}"
 LXC_HOME="${STATIX_LXC_HOME:-$STATE_DIR/lxc}"
 LXC_NETWORK_BRIDGE="${STATIX_LXC_NETWORK_BRIDGE:-lxcbr0}"
@@ -50,10 +53,6 @@ require_root() {
 
 require_systemd() {
   command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
-}
-
-require_sudo() {
-  command -v sudo >/dev/null 2>&1 || fail "sudo is required"
 }
 
 normalize_download_base_url() {
@@ -99,24 +98,19 @@ install_dependencies() {
   command -v apt-get >/dev/null 2>&1 || fail "apt-get is required"
 
   export DEBIAN_FRONTEND=noninteractive
-  log "installing dependencies"
+  log "installing dependency-manager bootstrap"
   apt-get update
-  apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    cloud-image-utils \
-    iproute2 \
-    lxc \
-    lxc-templates \
-    xz-utils \
-    pciutils \
-    qemu-system-arm \
-    qemu-system-x86 \
-    qemu-utils \
-    openssh-client \
-    uidmap \
-    wireguard-tools \
-    wget
+  apt-get install -y --no-install-recommends curl
+}
+
+install_dependency_helper() {
+  local temporary
+  temporary="$(mktemp)"
+  download_file "$DEPENDENCIES_URL" "$temporary" || fail "failed to download dependency helper"
+  install -d -m 0755 "$(dirname "$DEPENDENCIES_PATH")"
+  install -m 0755 "$temporary" "$DEPENDENCIES_PATH"
+  rm -f "$temporary"
+  "$DEPENDENCIES_PATH" --install
 }
 
 download_file() {
@@ -312,10 +306,10 @@ start_service() {
 main() {
   require_root
   require_systemd
-  require_sudo
   normalize_download_base_url
   check_platform
   install_dependencies
+  install_dependency_helper
   ensure_service_account
   install_agent_binary
   install_version_file
