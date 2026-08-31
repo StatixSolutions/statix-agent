@@ -116,12 +116,14 @@ build_shared_assets() {
   install -m 0644 installers/ubuntu/24.04/statix-agent.service "${UBUNTU_INSTALLER_ROOT}/statix-agent.service"
   install -m 0644 installers/ubuntu/24.04/statix-agent-update.service "${UBUNTU_INSTALLER_ROOT}/statix-agent-update.service"
   install -m 0755 installers/ubuntu/24.04/statix-agent-lxc-helper "${UBUNTU_INSTALLER_ROOT}/statix-agent-lxc-helper"
+  install -m 0755 installers/common/statix-agent-dependencies.sh "${UBUNTU_INSTALLER_ROOT}/statix-agent-dependencies.sh"
 
   install -m 0755 installers/archlinux/install.sh "${ARCH_INSTALLER_ROOT}/statix-agent-install-archlinux.sh"
   install -m 0755 installers/archlinux/update.sh "${ARCH_INSTALLER_ROOT}/statix-agent-update-archlinux.sh"
   install -m 0644 installers/archlinux/statix-agent.service "${ARCH_INSTALLER_ROOT}/statix-agent.service"
   install -m 0644 installers/archlinux/statix-agent-update.service "${ARCH_INSTALLER_ROOT}/statix-agent-update.service"
   install -m 0755 installers/archlinux/statix-agent-lxc-helper "${ARCH_INSTALLER_ROOT}/statix-agent-lxc-helper"
+  install -m 0755 installers/common/statix-agent-dependencies.sh "${ARCH_INSTALLER_ROOT}/statix-agent-dependencies.sh"
 
   built_at="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
   git_tag="${GIT_TAG:-$(git describe --tags --exact-match 2>/dev/null || printf 'dev')}"
@@ -144,6 +146,8 @@ EOF
   install -m 0755 "${ARCH_INSTALLER_ROOT}/statix-agent-update-archlinux.sh" "${UPLOAD_ROOT}/statix-agent-update-archlinux.sh"
   install -m 0644 "${METADATA_ROOT}/version.json" "${UPLOAD_ROOT}/version.json"
   install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-lxc-helper" "${UPLOAD_ROOT}/statix-agent-lxc-helper"
+  install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-dependencies.sh" "${UPLOAD_ROOT}/statix-agent-dependencies.sh"
+  sha256sum "${UPLOAD_ROOT}/statix-agent-dependencies.sh" > "${UPLOAD_ROOT}/statix-agent-dependencies.sh.sha256"
 }
 
 prepare_dirs
