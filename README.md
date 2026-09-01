@@ -74,5 +74,15 @@ RUST_LOG=debug statix-agent run
 journalctl -u statix-agent --no-pager -n 100
 ```
 
+To manually run the installed updater, use:
+
+```sh
+statix-agent update
+```
+
+The command starts `statix-agent-update.service`, waits for the oneshot to
+finish, and follows its journal output. It is available on Linux installations
+that include the updater service (such as the Ubuntu and Arch installers).
+
 Job stdout and stderr continue to be forwarded to the server as job logs.
 Agent diagnostics are bounded and common secret arguments are redacted.
