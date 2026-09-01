@@ -460,29 +460,9 @@ fn trim_trailing_slash(value: &str) -> String {
 }
 
 fn normalize_api_base_url(value: &str) -> String {
-    let trimmed = trim_trailing_slash(value.trim());
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let Some(_hostname) = extract_hostname(&trimmed) else {
-        return trimmed;
-    };
-
-    let without_scheme = trimmed
-        .split_once("://")
-        .map(|(_, remainder)| remainder)
-        .unwrap_or(trimmed.as_str());
-    let path = without_scheme
-        .find('/')
-        .map(|index| &without_scheme[index..])
-        .unwrap_or("");
-
-    if path.is_empty() {
-        return format!("{trimmed}/api");
-    }
-
-    trimmed
+    // The caller owns the routing prefix. Hosted deployments may expose the
+    // API at `/api`, while an ingress can expose it at the host root.
+    trim_trailing_slash(value.trim())
 }
 
 fn resolve_login_api_base_url(
@@ -609,7 +589,7 @@ mod tests {
             Some("http://env:3001/".to_owned()),
             Some("http://persisted:3001".to_owned()),
         );
-        assert_eq!(api_base_url, "http://env:3001/api");
+        assert_eq!(api_base_url, "http://env:3001");
     }
 
     #[test]
@@ -629,20 +609,20 @@ mod tests {
             None,
             Some("https://selfhosted.example.com/".to_owned()),
         );
-        assert_eq!(api_base_url, "https://selfhosted.example.com/api");
+        assert_eq!(api_base_url, "https://selfhosted.example.com");
     }
 
     #[test]
-    fn resolve_login_config_scopes_hosted_root_url_to_api() {
+    fn resolve_login_config_preserves_explicit_root_url() {
         let api_base_url =
             resolve_login_api_base_url(Some("https://statix.se".to_owned()), None, None);
-        assert_eq!(api_base_url, "https://statix.se/api");
+        assert_eq!(api_base_url, "https://statix.se");
     }
 
     #[test]
-    fn normalize_api_base_url_scopes_hosted_subdomain_root_url_to_api() {
+    fn normalize_api_base_url_preserves_root_url() {
         let api_base_url = normalize_api_base_url("https://dev.statix.se/");
-        assert_eq!(api_base_url, "https://dev.statix.se/api");
+        assert_eq!(api_base_url, "https://dev.statix.se");
     }
 
     #[test]
@@ -652,9 +632,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_login_config_scopes_local_root_url_to_api() {
+    fn resolve_login_config_preserves_local_root_url() {
         let api_base_url =
             resolve_login_api_base_url(Some("http://localhost:3001/".to_owned()), None, None);
-        assert_eq!(api_base_url, "http://localhost:3001/api");
+        assert_eq!(api_base_url, "http://localhost:3001");
     }
 }
