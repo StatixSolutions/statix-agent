@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
-    process::Command as TokioCommand,
+    process::{Child, Command as TokioCommand},
     select, signal,
     sync::{mpsc, watch},
     time::{MissedTickBehavior, interval},
@@ -310,6 +310,7 @@ struct Cli {
 enum Command {
     Run,
     Login(LoginArgs),
+    Update,
 }
 
 #[derive(Debug, Args)]
@@ -361,6 +362,7 @@ async fn dispatch() -> Result<()> {
             let login_config = resolve_login_config(options.api_base_url.clone());
             run_login(login_config, options).await
         }
+        Some(Command::Update) => request_update().await,
     }
 }
 
@@ -2122,7 +2124,50 @@ fn hash_key(value: &str) -> String {
 
 async fn request_update() -> Result<()> {
     let mut runner = RealUpdateCommandRunner;
-    request_update_with(&mut runner).await
+    let mut log_stream = start_update_log_stream();
+    let result = request_update_with(&mut runner).await;
+
+    if let Some(child) = log_stream.as_mut() {
+        if let Err(error) = child.kill().await {
+            debug!(error = %error, "failed to stop update journal stream");
+        }
+        let _ = child.wait().await;
+    }
+
+    result
+}
+
+fn start_update_log_stream() -> Option<Child> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let service = std::env::var("STATIX_UPDATE_SERVICE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "statix-agent-update.service".to_owned());
+
+        match TokioCommand::new("journalctl")
+            .args([
+                "--follow",
+                "--unit",
+                service.as_str(),
+                "--since",
+                "now",
+                "--no-pager",
+            ])
+            .spawn()
+        {
+            Ok(child) => Some(child),
+            Err(error) => {
+                warn!(error = %error, "failed to stream update journal; continuing without live logs");
+                None
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -2282,6 +2327,16 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn cli_parses_update_command() {
+        assert!(matches!(
+            Cli::try_parse_from(["statix-agent", "update"])
+                .unwrap()
+                .command,
+            Some(Command::Update)
+        ));
     }
 
     #[test]
