@@ -4,3 +4,6 @@
 the distro-specific installer. The updater downloads the same asset before
 replacing the agent binary, so dependency installation and validation have one
 source of truth.
+
+The updater also downloads the cumulative host-migration bundle, verifies its
+checksum, and applies pending migrations before replacing the agent binary.
