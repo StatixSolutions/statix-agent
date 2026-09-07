@@ -30,18 +30,22 @@ pub struct WireGuardStatus {
     pub error: Option<String>,
 }
 
-pub async fn resolve_or_generate_identity() -> Result<WireGuardIdentity> {
+pub async fn resolve_or_generate_identity() -> Result<Option<WireGuardIdentity>> {
     if let Some(existing) = load_persisted_config_snapshot()?
         .and_then(|value| value.wireguard)
         .filter(|value| !value.private_key.trim().is_empty() && !value.public_key.trim().is_empty())
     {
-        return Ok(WireGuardIdentity {
+        return Ok(Some(WireGuardIdentity {
             private_key: existing.private_key,
             public_key: existing.public_key,
-        });
+        }));
     }
 
-    generate_identity().await
+    match std::process::Command::new("wg").arg("--version").output() {
+        Ok(_) => generate_identity().await.map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("failed to check wireguard tooling")?,
+    }
 }
 
 pub async fn ensure_applied(config: &WireGuardConfig) -> Result<PathBuf> {
