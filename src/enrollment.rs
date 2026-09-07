@@ -99,7 +99,7 @@ struct EnrollmentWireGuardPeerConfig {
 }
 
 fn check_dependencies() -> Result<()> {
-    let required_cmds = ["wg", "ip", "tar"];
+    let required_cmds = ["ip", "tar"];
     let mut missing = Vec::new();
 
     for cmd in required_cmds.iter() {
@@ -151,7 +151,9 @@ pub async fn run_login(login_config: LoginConfig, options: LoginOptions) -> Resu
                 os_arch: &system_info.info.os_arch,
                 agent_version: system_info.info.agent_version.as_deref(),
                 mac_addresses: (!mac_addresses.is_empty()).then_some(mac_addresses.as_slice()),
-                wireguard_public_key: Some(&wireguard_identity.public_key),
+                wireguard_public_key: wireguard_identity
+                    .as_ref()
+                    .map(|identity| identity.public_key.as_str()),
             },
         })
         .send()
@@ -238,20 +240,30 @@ pub async fn run_login(login_config: LoginConfig, options: LoginOptions) -> Resu
                 agent_ws_url,
                 wireguard,
             } => {
-                let wireguard = wireguard.map(|value| WireGuardConfig {
-                    interface_name: value.interface_name,
-                    addresses: value.addresses,
-                    dns: value.dns,
-                    private_key: wireguard_identity.private_key.clone(),
-                    public_key: wireguard_identity.public_key.clone(),
-                    server: WireGuardPeerConfig {
-                        public_key: value.server.public_key,
-                        endpoint: value.server.endpoint,
-                        allowed_ips: value.server.allowed_ips,
-                        preshared_key: value.server.preshared_key,
-                        persistent_keepalive_seconds: value.server.persistent_keepalive_seconds,
-                    },
-                });
+                let wireguard = match wireguard {
+                    Some(value) => {
+                        let identity = wireguard_identity.as_ref().context(
+                            "enrollment returned WireGuard configuration, but wg is unavailable",
+                        )?;
+                        Some(WireGuardConfig {
+                            interface_name: value.interface_name,
+                            addresses: value.addresses,
+                            dns: value.dns,
+                            private_key: identity.private_key.clone(),
+                            public_key: identity.public_key.clone(),
+                            server: WireGuardPeerConfig {
+                                public_key: value.server.public_key,
+                                endpoint: value.server.endpoint,
+                                allowed_ips: value.server.allowed_ips,
+                                preshared_key: value.server.preshared_key,
+                                persistent_keepalive_seconds: value
+                                    .server
+                                    .persistent_keepalive_seconds,
+                            },
+                        })
+                    }
+                    None => None,
+                };
                 let path = save_persisted_config(&PersistedAgentConfig {
                     node_id: node_id.clone(),
                     node_token: node_token.clone(),
