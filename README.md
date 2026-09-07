@@ -6,6 +6,7 @@ This repo contains:
 - the Rust `statix` agent binary
 - Ubuntu installer assets under `installers/ubuntu/24.04`
 - Arch Linux installer assets under `installers/archlinux`
+- Debian installer assets under `installers/debian`
 - the host-side systemd units and updater script
 
 ## Releases
@@ -20,6 +21,8 @@ The expected public release assets are:
 - `statix-agent-update-ubuntu-24.04.sh`
 - `statix-agent-install-archlinux.sh`
 - `statix-agent-update-archlinux.sh`
+- `statix-agent-install-debian.sh`
+- `statix-agent-update-debian.sh`
 
 Installer assets should be published under:
 

@@ -21,6 +21,13 @@ ubuntu_packages() {
     openssh-client uidmap wget sudo
 }
 
+debian_packages() {
+  printf '%s\n' \
+    ca-certificates curl cloud-image-utils iproute2 lxc lxc-templates \
+    xz-utils pciutils qemu-system-arm qemu-system-x86 qemu-utils \
+    openssh-client uidmap wget sudo
+}
+
 arch_packages() {
   printf '%s\n' \
     ca-certificates curl iproute2 lxc xz pciutils sudo \
@@ -33,6 +40,7 @@ detect_distro() {
   . /etc/os-release
   case "${ID:-}" in
     ubuntu) printf 'ubuntu' ;;
+    debian) printf 'debian' ;;
     arch) printf 'archlinux' ;;
     *) fail "unsupported Linux distribution: ${ID:-unknown}" ;;
   esac
@@ -47,6 +55,13 @@ install_packages() {
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
       mapfile -t packages < <(ubuntu_packages)
+      apt-get install -y --no-install-recommends "${packages[@]}"
+      ;;
+    debian)
+      command -v apt-get >/dev/null 2>&1 || fail "apt-get is required"
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      mapfile -t packages < <(debian_packages)
       apt-get install -y --no-install-recommends "${packages[@]}"
       ;;
     archlinux)

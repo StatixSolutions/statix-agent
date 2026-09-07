@@ -8,6 +8,7 @@ UPLOAD_ROOT="${OUTPUT_ROOT}/upload"
 LINUX_ROOT="${RELEASE_ROOT}/linux"
 UBUNTU_INSTALLER_ROOT="${RELEASE_ROOT}/installers/ubuntu/24.04"
 ARCH_INSTALLER_ROOT="${RELEASE_ROOT}/installers/archlinux"
+DEBIAN_INSTALLER_ROOT="${RELEASE_ROOT}/installers/debian"
 METADATA_ROOT="${RELEASE_ROOT}/metadata"
 BINARY_NAME="statix-agent"
 
@@ -76,7 +77,7 @@ binary_path_for_target() {
 }
 
 prepare_dirs() {
-  mkdir -p "$LINUX_ROOT" "$UBUNTU_INSTALLER_ROOT" "$ARCH_INSTALLER_ROOT" "$METADATA_ROOT" "$UPLOAD_ROOT"
+  mkdir -p "$LINUX_ROOT" "$UBUNTU_INSTALLER_ROOT" "$ARCH_INSTALLER_ROOT" "$DEBIAN_INSTALLER_ROOT" "$METADATA_ROOT" "$UPLOAD_ROOT"
 }
 
 build_binary_assets() {
@@ -125,6 +126,13 @@ build_shared_assets() {
   install -m 0755 installers/archlinux/statix-agent-lxc-helper "${ARCH_INSTALLER_ROOT}/statix-agent-lxc-helper"
   install -m 0755 installers/common/statix-agent-dependencies.sh "${ARCH_INSTALLER_ROOT}/statix-agent-dependencies.sh"
 
+  install -m 0755 installers/debian/install.sh "${DEBIAN_INSTALLER_ROOT}/statix-agent-install-debian.sh"
+  install -m 0755 installers/debian/update.sh "${DEBIAN_INSTALLER_ROOT}/statix-agent-update-debian.sh"
+  install -m 0644 installers/ubuntu/24.04/statix-agent.service "${DEBIAN_INSTALLER_ROOT}/statix-agent.service"
+  install -m 0644 installers/ubuntu/24.04/statix-agent-update.service "${DEBIAN_INSTALLER_ROOT}/statix-agent-update.service"
+  install -m 0755 installers/ubuntu/24.04/statix-agent-lxc-helper "${DEBIAN_INSTALLER_ROOT}/statix-agent-lxc-helper"
+  install -m 0755 installers/common/statix-agent-dependencies.sh "${DEBIAN_INSTALLER_ROOT}/statix-agent-dependencies.sh"
+
   built_at="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
   git_tag="${GIT_TAG:-$(git describe --tags --exact-match 2>/dev/null || printf 'dev')}"
   git_sha="${GIT_SHA:-$(git rev-parse HEAD)}"
@@ -144,6 +152,8 @@ EOF
 
   install -m 0755 "${ARCH_INSTALLER_ROOT}/statix-agent-install-archlinux.sh" "${UPLOAD_ROOT}/statix-agent-install-archlinux.sh"
   install -m 0755 "${ARCH_INSTALLER_ROOT}/statix-agent-update-archlinux.sh" "${UPLOAD_ROOT}/statix-agent-update-archlinux.sh"
+  install -m 0755 "${DEBIAN_INSTALLER_ROOT}/statix-agent-install-debian.sh" "${UPLOAD_ROOT}/statix-agent-install-debian.sh"
+  install -m 0755 "${DEBIAN_INSTALLER_ROOT}/statix-agent-update-debian.sh" "${UPLOAD_ROOT}/statix-agent-update-debian.sh"
   install -m 0644 "${METADATA_ROOT}/version.json" "${UPLOAD_ROOT}/version.json"
   install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-lxc-helper" "${UPLOAD_ROOT}/statix-agent-lxc-helper"
   install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-dependencies.sh" "${UPLOAD_ROOT}/statix-agent-dependencies.sh"

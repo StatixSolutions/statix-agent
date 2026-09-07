@@ -9,6 +9,36 @@ permissions:
   contents: write
 
 jobs:
+  validate-debian:
+    name: Validate Debian ${{ matrix.debian_version }} installer dependencies
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        debian_version: ['12', '13']
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Debian scripts and dependencies
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo:ro" \
+            "debian:${{ matrix.debian_version }}" \
+            bash -euxo pipefail -c '
+              bash -n /repo/installers/debian/install.sh
+              bash -n /repo/installers/debian/update.sh
+              bash -n /repo/installers/common/statix-agent-dependencies.sh
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl cloud-image-utils iproute2 lxc lxc-templates \
+                xz-utils pciutils qemu-system-arm qemu-system-x86 qemu-utils \
+                openssh-client uidmap wget sudo
+              /repo/installers/common/statix-agent-dependencies.sh --check
+            '
+
   build:
     name: Build ${{ matrix.asset_arch }}
     runs-on: ubuntu-latest
@@ -58,7 +88,7 @@ jobs:
   publish-release:
     name: Publish release
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [build, validate-debian]
     runs-on: ubuntu-latest
 
     steps:
