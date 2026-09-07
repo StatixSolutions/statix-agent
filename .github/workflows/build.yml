@@ -35,7 +35,7 @@ jobs:
               apt-get install -y --no-install-recommends \
                 ca-certificates curl cloud-image-utils iproute2 lxc lxc-templates \
                 xz-utils pciutils qemu-system-arm qemu-system-x86 qemu-utils \
-                openssh-client uidmap wget sudo
+                openssh-client uidmap wget sudo systemd
               /repo/installers/common/statix-agent-dependencies.sh --check
             '
 

@@ -18,14 +18,14 @@ ubuntu_packages() {
   printf '%s\n' \
     ca-certificates curl cloud-image-utils iproute2 lxc lxc-templates \
     xz-utils pciutils qemu-system-arm qemu-system-x86 qemu-utils \
-    openssh-client uidmap wget sudo
+    openssh-client uidmap wget sudo systemd
 }
 
 debian_packages() {
   printf '%s\n' \
     ca-certificates curl cloud-image-utils iproute2 lxc lxc-templates \
     xz-utils pciutils qemu-system-arm qemu-system-x86 qemu-utils \
-    openssh-client uidmap wget sudo
+    openssh-client uidmap wget sudo systemd
 }
 
 arch_packages() {
