@@ -14,7 +14,10 @@ fn test_root(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!(
+    let root = std::env::var_os("STATE_DIRECTORY")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    root.join(format!(
         "statix-runner-{name}-{}-{stamp}",
         std::process::id()
     ))
@@ -46,6 +49,25 @@ fn workspace(name: &str) -> (PathBuf, PreparedWorkspace) {
 }
 
 fn configure_state(name: &str) -> PathBuf {
+    if std::env::var_os("STATIX_RUNNER_TEST_SYSTEMD").is_some() {
+        assert!(
+            std::env::var_os("INVOCATION_ID").is_some(),
+            "not running under systemd"
+        );
+        assert_eq!(
+            std::env::var("STATE_DIRECTORY").unwrap(),
+            "/var/lib/statix-agent"
+        );
+        let user = std::process::Command::new("id")
+            .arg("-un")
+            .output()
+            .unwrap();
+        assert!(user.status.success());
+        assert_eq!(String::from_utf8_lossy(&user.stdout).trim(), "statix-agent");
+        eprintln!(
+            "{name}: running as statix-agent under systemd, state beneath /var/lib/statix-agent"
+        );
+    }
     let state = test_root(name);
     fs::create_dir_all(&state).unwrap();
     unsafe {
@@ -81,8 +103,12 @@ async fn lxc_docker_spins_up_executes_and_cleans_up() {
         compose_command(),
     )
     .await
-    .unwrap();
-    assert_eq!(result.status, "succeeded");
+    .unwrap_or_else(|error| panic!("LXC runner failed: {error:#}"));
+    assert_eq!(
+        result.status, "succeeded",
+        "LXC runner: {:?}",
+        result.message
+    );
     let message = result.message.unwrap();
     assert!(message.contains("ok: success"), "{message}");
     assert!(!state.join("lxc/containers/statix-attempt-lxc").exists());
@@ -112,8 +138,12 @@ async fn microvm_spins_up_executes_and_cleans_up() {
         compose_command(),
     )
     .await
-    .unwrap();
-    assert_eq!(result.status, "succeeded");
+    .unwrap_or_else(|error| panic!("MicroVM runner failed: {error:#}"));
+    assert_eq!(
+        result.status, "succeeded",
+        "MicroVM runner: {:?}",
+        result.message
+    );
     let message = result.message.unwrap();
     assert!(message.contains("ok: success"), "{message}");
     let _ = fs::remove_dir_all(workdir);

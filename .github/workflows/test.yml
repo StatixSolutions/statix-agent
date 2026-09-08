@@ -57,7 +57,7 @@ jobs:
       - name: Verify Docker and KVM
         run: |
           docker info
-          # Tests run as root in a privileged Docker container; check KVM as root too.
+          # Check host KVM availability; tests run as statix-agent under systemd.
           sudo python3 - <<'PY'
           import fcntl
           import os
