@@ -10,6 +10,7 @@ export HOME="$STATE_ROOT/lxc"
 export XDG_CACHE_HOME="$HOME/.cache"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_DATA_HOME="$HOME/.local/share"
+export LXC_CACHE_PATH="$HOME/.cache/lxc"
 
 fail() {
   printf 'statix-agent-lxc: %s\n' "$*" >&2
@@ -44,7 +45,7 @@ done
 
 [[ -n "$name" ]] || fail "container name is required"
 [[ -n "$path" ]] || fail "LXC storage path is required"
-install -d -m 0755 "$STORAGE_ROOT" "$HOME/.cache" "$HOME/.config" "$HOME/.local/share"
+install -d -m 0755 "$STORAGE_ROOT" "$HOME/.cache" "$HOME/.cache/lxc" "$HOME/.config" "$HOME/.local/share"
 
 case "$operation" in
   lxc-attach)

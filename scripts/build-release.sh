@@ -10,6 +10,7 @@ UBUNTU_INSTALLER_ROOT="${RELEASE_ROOT}/installers/ubuntu/24.04"
 ARCH_INSTALLER_ROOT="${RELEASE_ROOT}/installers/archlinux"
 DEBIAN_INSTALLER_ROOT="${RELEASE_ROOT}/installers/debian"
 METADATA_ROOT="${RELEASE_ROOT}/metadata"
+MIGRATIONS_ROOT="${RELEASE_ROOT}/migrations"
 BINARY_NAME="statix-agent"
 
 log() {
@@ -77,7 +78,7 @@ binary_path_for_target() {
 }
 
 prepare_dirs() {
-  mkdir -p "$LINUX_ROOT" "$UBUNTU_INSTALLER_ROOT" "$ARCH_INSTALLER_ROOT" "$DEBIAN_INSTALLER_ROOT" "$METADATA_ROOT" "$UPLOAD_ROOT"
+  mkdir -p "$LINUX_ROOT" "$UBUNTU_INSTALLER_ROOT" "$ARCH_INSTALLER_ROOT" "$DEBIAN_INSTALLER_ROOT" "$METADATA_ROOT" "$MIGRATIONS_ROOT" "$UPLOAD_ROOT"
 }
 
 build_binary_assets() {
@@ -109,6 +110,36 @@ build_binary_assets() {
   install -m 0644 "${binary_dir}/statix-agent-linux-${asset_arch}.sha256" "$flat_sha"
 }
 
+build_migration_assets() {
+  local archive manifest file migration_id first
+  local migration_files=()
+
+  while IFS= read -r file; do
+    migration_files+=("$(basename "$file")")
+  done < <(find migrations -maxdepth 1 -type f -name '*.sh' -print | sort)
+
+  ((${#migration_files[@]} > 0)) || fail "no migration scripts found"
+  for migration_id in "${migration_files[@]}"; do
+    [[ "$migration_id" =~ ^[0-9]{4}-[a-z0-9-]+\.sh$ ]] || fail "invalid migration filename: $migration_id"
+  done
+
+  archive="${MIGRATIONS_ROOT}/statix-agent-migrations.tar.gz"
+  manifest="${MIGRATIONS_ROOT}/statix-agent-migrations.json"
+  tar -czf "$archive" -C migrations "${migration_files[@]}"
+  sha256sum "$archive" > "${archive}.sha256"
+
+  {
+    printf '{\n  "schemaVersion": 1,\n  "migrations": ['
+    first=1
+    for migration_id in "${migration_files[@]}"; do
+      if ((first)); then first=0; else printf ', '; fi
+      printf '\n    {"id":"%s"}' "${migration_id%.sh}"
+    done
+    printf '\n  ]\n}\n'
+  } >"$manifest"
+  sha256sum "$manifest" > "${manifest}.sha256"
+}
+
 build_shared_assets() {
   local built_at git_tag git_sha
 
@@ -133,6 +164,8 @@ build_shared_assets() {
   install -m 0755 installers/ubuntu/24.04/statix-agent-lxc-helper "${DEBIAN_INSTALLER_ROOT}/statix-agent-lxc-helper"
   install -m 0755 installers/common/statix-agent-dependencies.sh "${DEBIAN_INSTALLER_ROOT}/statix-agent-dependencies.sh"
 
+  build_migration_assets
+
   built_at="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
   git_tag="${GIT_TAG:-$(git describe --tags --exact-match 2>/dev/null || printf 'dev')}"
   git_sha="${GIT_SHA:-$(git rev-parse HEAD)}"
@@ -156,8 +189,13 @@ EOF
   install -m 0755 "${DEBIAN_INSTALLER_ROOT}/statix-agent-update-debian.sh" "${UPLOAD_ROOT}/statix-agent-update-debian.sh"
   install -m 0644 "${METADATA_ROOT}/version.json" "${UPLOAD_ROOT}/version.json"
   install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-lxc-helper" "${UPLOAD_ROOT}/statix-agent-lxc-helper"
+  sha256sum "${UPLOAD_ROOT}/statix-agent-lxc-helper" > "${UPLOAD_ROOT}/statix-agent-lxc-helper.sha256"
   install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-dependencies.sh" "${UPLOAD_ROOT}/statix-agent-dependencies.sh"
   sha256sum "${UPLOAD_ROOT}/statix-agent-dependencies.sh" > "${UPLOAD_ROOT}/statix-agent-dependencies.sh.sha256"
+  install -m 0644 "$MIGRATIONS_ROOT/statix-agent-migrations.tar.gz" "$UPLOAD_ROOT/statix-agent-migrations.tar.gz"
+  install -m 0644 "$MIGRATIONS_ROOT/statix-agent-migrations.tar.gz.sha256" "$UPLOAD_ROOT/statix-agent-migrations.tar.gz.sha256"
+  install -m 0644 "$MIGRATIONS_ROOT/statix-agent-migrations.json" "$UPLOAD_ROOT/statix-agent-migrations.json"
+  install -m 0644 "$MIGRATIONS_ROOT/statix-agent-migrations.json.sha256" "$UPLOAD_ROOT/statix-agent-migrations.json.sha256"
 }
 
 prepare_dirs

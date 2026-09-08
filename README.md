@@ -16,6 +16,8 @@ The expected public release assets are:
 - `statix-agent-linux-arm64`
 - matching `.sha256` files
 - `statix-agent-dependencies.sh` and its `.sha256` file
+- `statix-agent-migrations.tar.gz` and its `.sha256` file
+- `statix-agent-migrations.json` and its `.sha256` file
 - distro-specific installer assets for supported distributions, for example:
 - `statix-agent-install-ubuntu-24.04.sh`
 - `statix-agent-update-ubuntu-24.04.sh`
@@ -33,6 +35,17 @@ https://github.com/StatixSolutions/statix-agent/releases/latest/download
 Public docs or bootstrap scripts in the `statix` repo should select the correct
 installer asset for the target distribution instead of assuming a universal
 Linux `install.sh` or `update.sh`.
+
+Host migrations are cumulative release assets. New migration scripts go under
+`migrations/` with a unique four-digit prefix and are never renamed or removed
+after release. The updater records the last successful migration in
+`/var/lib/statix-agent/migrations/state.json` and retries pending migrations on
+the next update if one fails.
+
+The first release containing the migration runner must be installed on existing
+hosts with the platform installer once, because older updater scripts cannot
+execute migrations they do not contain. Subsequent updates apply pending
+migrations automatically.
 
 ## Local build
 

@@ -29,6 +29,11 @@ jobs:
             bash -euxo pipefail -c '
               bash -n /repo/installers/debian/install.sh
               bash -n /repo/installers/debian/update.sh
+              bash -n /repo/installers/ubuntu/24.04/statix-agent-lxc-helper
+              bash -n /repo/installers/ubuntu/24.04/update.sh
+              bash -n /repo/installers/archlinux/statix-agent-lxc-helper
+              bash -n /repo/installers/archlinux/update.sh
+              bash -n /repo/migrations/0001-lxc-cache-path.sh
               bash -n /repo/installers/common/statix-agent-dependencies.sh
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
