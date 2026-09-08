@@ -161,7 +161,7 @@ repair_lxc_helper() {
   helper_url="${STATIX_LXC_HELPER_URL:-$DOWNLOAD_BASE_URL/statix-agent-lxc-helper}"
   temporary="$(mktemp)"
   log "downloading LXC helper from $helper_url"
-  download_file "$helper_url" "$temporary" || fail "failed to download LXC helper"
+  download_verified "$helper_url" "$temporary"
   install -d -m 0755 "$(dirname "$LXC_HELPER_PATH")"
   install -o root -g root -m 0755 "$temporary" "$LXC_HELPER_PATH"
   rm -f "$temporary"

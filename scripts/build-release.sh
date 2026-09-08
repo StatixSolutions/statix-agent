@@ -116,7 +116,7 @@ build_migration_assets() {
 
   while IFS= read -r file; do
     migration_files+=("$(basename "$file")")
-  done < <(find migrations -maxdepth 1 -type f -name '[0-9][0-9][0-9][0-9]-*.sh' -print | sort)
+  done < <(find migrations -maxdepth 1 -type f -name '*.sh' -print | sort)
 
   ((${#migration_files[@]} > 0)) || fail "no migration scripts found"
   for migration_id in "${migration_files[@]}"; do
@@ -189,6 +189,7 @@ EOF
   install -m 0755 "${DEBIAN_INSTALLER_ROOT}/statix-agent-update-debian.sh" "${UPLOAD_ROOT}/statix-agent-update-debian.sh"
   install -m 0644 "${METADATA_ROOT}/version.json" "${UPLOAD_ROOT}/version.json"
   install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-lxc-helper" "${UPLOAD_ROOT}/statix-agent-lxc-helper"
+  sha256sum "${UPLOAD_ROOT}/statix-agent-lxc-helper" > "${UPLOAD_ROOT}/statix-agent-lxc-helper.sha256"
   install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-dependencies.sh" "${UPLOAD_ROOT}/statix-agent-dependencies.sh"
   sha256sum "${UPLOAD_ROOT}/statix-agent-dependencies.sh" > "${UPLOAD_ROOT}/statix-agent-dependencies.sh.sha256"
   install -m 0644 "$MIGRATIONS_ROOT/statix-agent-migrations.tar.gz" "$UPLOAD_ROOT/statix-agent-migrations.tar.gz"
