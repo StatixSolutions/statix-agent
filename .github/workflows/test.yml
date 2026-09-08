@@ -1,0 +1,75 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        id: rust
+
+      - name: Cache Cargo dependencies and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run unit tests
+        run: cargo test --locked --all-targets
+
+  runner-integration-tests:
+    name: Runner integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Verify Docker and KVM
+        run: |
+          docker info
+          # Tests run as root in a privileged Docker container; check KVM as root too.
+          sudo python3 - <<'PY'
+          import fcntl
+          import os
+
+          try:
+              with open('/dev/kvm', 'rb+', buffering=0) as kvm:
+                  # KVM_CREATE_VM proves hardware acceleration is usable.
+                  vm = fcntl.ioctl(kvm, 0xAE01, 0)
+                  os.close(vm)
+          except OSError as error:
+              raise SystemExit(f'::error::Runner integration tests require usable /dev/kvm: {error}')
+          PY
+
+      - name: Run LXC and MicroVM integration tests
+        run: just test-runners
