@@ -62,6 +62,25 @@ bash scripts/build-release.sh all
 This stages structured output under `dist/release/` and writes the flat GitHub
 release asset set under `dist/upload/`.
 
+## Pull request checks
+
+The `Test` GitHub Actions workflow runs on pull requests targeting `main` and
+can also be started manually. Independent `Unit tests` and `Runner integration
+tests` jobs run on Ubuntu 24.04, with 15- and 45-minute timeouts respectively.
+New commits cancel superseded runs for the same PR.
+
+Run the same checks locally with `just test` (`cargo test --locked --all-targets`)
+and `just test-runners`. CI uses stable Rust and the committed Cargo lockfile.
+The integration job verifies Docker and usable `/dev/kvm` before running both
+ignored tests serially in the privileged test container. Missing prerequisites
+fail the check; the tests are not silently skipped. Ubuntu cloud images and the
+GHCR test image must be anonymously accessible. GitHub-hosted nested
+virtualization is not officially supported, so the workflow requires a successful
+hosted integration run to validate runner compatibility.
+
+These workflows report PR checks; requiring them before merging is configured
+separately in repository branch rules.
+
 ## Runner integration tests
 
 `just test` runs the fast unit suite. LXC/Docker-in-LXC and MicroVM tests are available
