@@ -131,37 +131,44 @@ assert_file_contains() {
   }
 }
 
+check() {
+  local name="$1"
+  shift
+  printf '[updater-test] %s\n' "$name"
+  "$@"
+}
+
 make_migration_assets success
 printf 'old-agent\n' >"$install_root/statix-agent"
 printf '{"schemaVersion":1,"lastMigration":"0000"}\n' >"$state_root/migrations-state-before"
 
-run_update
-assert_file_contains "$install_root/statix-agent" 'new-agent'
-assert_file_contains "$state_root/migration-runs" '1'
-grep -Fq '0001-test-state' "$state_root/migrations/state.json"
-test -s "$tmp_root/dependency-installed"
-test -f "$install_root/statix-agent-lxc"
+check 'successful update' run_update
+check 'new binary installed' assert_file_contains "$install_root/statix-agent" 'new-agent'
+check 'migration ran once' assert_file_contains "$state_root/migration-runs" '1'
+check 'migration state recorded' grep -Fq '0001-test-state' "$state_root/migrations/state.json"
+check 'dependency helper ran' test -s "$tmp_root/dependency-installed"
+check 'LXC helper installed' test -f "$install_root/statix-agent-lxc"
 
-run_update
-assert_file_contains "$state_root/migration-runs" '1'
+check 'idempotent update' run_update
+check 'migration was not repeated' assert_file_contains "$state_root/migration-runs" '1'
 
 printf 'old-agent\n' >"$install_root/statix-agent"
 rm -f "$state_root/migrations/state.json" "$tmp_root/fail-start"
 make_migration_assets failure
-if run_update; then
+if check 'failed migration is rejected' run_update; then
   printf 'failing migration unexpectedly succeeded\n' >&2
   exit 1
 fi
-assert_file_contains "$install_root/statix-agent" 'old-agent'
-test ! -e "$state_root/migrations/state.json"
+check 'old binary retained after migration failure' assert_file_contains "$install_root/statix-agent" 'old-agent'
+check 'migration state not advanced' test ! -e "$state_root/migrations/state.json"
 
 make_migration_assets success
 rm -f "$state_root/migrations/state.json"
 touch "$tmp_root/fail-start"
-if run_update; then
+if check 'failed service start is rejected' run_update; then
   printf 'failed service start unexpectedly succeeded\n' >&2
   exit 1
 fi
-assert_file_contains "$install_root/statix-agent" 'old-agent'
+check 'old binary restored after service failure' assert_file_contains "$install_root/statix-agent" 'old-agent'
 
 printf 'updater tests passed\n'
