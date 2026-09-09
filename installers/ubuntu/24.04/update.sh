@@ -142,6 +142,14 @@ apply_migrations() {
     write_migration_state "$migration_id"
     last_migration="$migration_id"
   done
+
+  # RETURN traps run after local variables have gone out of scope when this
+  # function returns. Clear the trap and clean up while the locals are still
+  # defined, otherwise set -u reports an unbound variable after a successful
+  # migration run.
+  trap - RETURN
+  rm -f "$archive" "$manifest"
+  rm -rf "$extraction_dir"
 }
 
 repair_dependencies() {
