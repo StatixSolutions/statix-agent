@@ -60,4 +60,23 @@ case "$operation" in
     ;;
 esac
 
+# lxc-create is executed as root by sudo, so its generated config is normally
+# root-owned. The agent appends its resource/network settings immediately after
+# creation, before starting the container; hand that one host-side file back to
+# the invoking service user while leaving the container rootfs privileged.
+if [[ "$operation" == lxc-create ]]; then
+  if "/usr/bin/$operation" "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  (( status == 0 )) || exit "$status"
+  config="$STORAGE_ROOT/$name/config"
+  if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" && -f "$config" ]]; then
+    chown "$SUDO_UID:$SUDO_GID" "$config"
+  fi
+  chmod 0640 "$config"
+  exit 0
+fi
+
 exec "/usr/bin/$operation" "$@"
