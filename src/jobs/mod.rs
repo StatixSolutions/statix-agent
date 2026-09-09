@@ -253,6 +253,15 @@ fn truncate_output(value: &str) -> String {
         return trimmed.to_owned();
     }
 
-    let truncated = trimmed.chars().take(MAX_CHARS).collect::<String>();
-    format!("{truncated}...")
+    const EDGE_CHARS: usize = (MAX_CHARS - 32) / 2;
+    let head = trimmed.chars().take(EDGE_CHARS).collect::<String>();
+    let tail = trimmed
+        .chars()
+        .rev()
+        .take(EDGE_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{head}\n... output truncated ...\n{tail}")
 }

@@ -448,23 +448,6 @@ users:
       - {public_key}
 ssh_pwauth: false
 disable_root: true
-package_update: true
-packages:
-  - build-essential
-  - ca-certificates
-  - curl
-  - docker.io
-  - docker-compose-v2
-  - git
-  - libssl-dev
-  - openssh-server
-  - pkg-config
-runcmd:
-  - [bash, -lc, "id -u {user} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash {user}"]
-  - [systemctl, enable, --now, docker]
-  - [usermod, -aG, docker, "{user}"]
-  - [install, -d, -o, "{user}", -g, "{user}", -m, "0755", "/home/{user}/docker"]
-  - [su, "-", "{user}", "-c", "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable"]
 "#,
         user = DEFAULT_SSH_USER,
         public_key = public_key.trim(),
@@ -665,6 +648,7 @@ async fn wait_for_guest_ready(
     let deadline = Duration::from_secs(timeout_seconds);
     let start = Instant::now();
     let mut next_progress_log = Duration::from_secs(15);
+    let mut last_probe_failure = "SSH readiness probe has not run yet".to_string();
 
     loop {
         if let Some(status) = qemu.try_wait()? {
@@ -672,7 +656,10 @@ async fn wait_for_guest_ready(
         }
 
         if start.elapsed() >= deadline {
-            bail!("microvm did not become ready before timeout");
+            bail!(
+                "microvm did not become ready before timeout; last probe: {}",
+                last_probe_failure
+            );
         }
 
         let remaining = deadline.saturating_sub(start.elapsed());
@@ -687,13 +674,14 @@ async fn wait_for_guest_ready(
             .arg("-f")
             .arg("/var/lib/cloud/instance/boot-finished");
 
-        let last_probe_failure =
+        let probe_failure =
             match timeout(remaining.min(Duration::from_secs(5)), probe.output()).await {
                 Ok(Ok(output)) if output.status.success() => return Ok(()),
                 Ok(Ok(output)) => readiness_probe_failure(&output),
                 Ok(Err(error)) => format!("failed to launch ssh readiness probe: {error}"),
                 Err(_) => "ssh readiness probe timed out".to_string(),
             };
+        last_probe_failure = probe_failure;
 
         let elapsed = start.elapsed();
         if elapsed >= next_progress_log {

@@ -32,4 +32,19 @@ if [[ "$operation" == lxc-attach ]]; then
   (( found_separator == 1 )) || fail "attach requires -- command separator"
 fi
 if [[ "$operation" == lxc-create && " $* " != *" -t download "* ]]; then fail "create must use the download template"; fi
+if [[ "$operation" == lxc-create ]]; then
+  if "/usr/bin/$operation" "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  (( status == 0 )) || exit "$status"
+  chmod 0755 "$STORAGE_ROOT/$name"
+  config="$STORAGE_ROOT/$name/config"
+  if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" && -f "$config" ]]; then
+    chown "$SUDO_UID:$SUDO_GID" "$config"
+  fi
+  chmod 0640 "$config"
+  exit 0
+fi
 exec "/usr/bin/$operation" "$@"
