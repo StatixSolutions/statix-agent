@@ -71,6 +71,7 @@ if [[ "$operation" == lxc-create ]]; then
     status=$?
   fi
   (( status == 0 )) || exit "$status"
+  chmod 0755 "$STORAGE_ROOT/$name"
   config="$STORAGE_ROOT/$name/config"
   if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" && -f "$config" ]]; then
     chown "$SUDO_UID:$SUDO_GID" "$config"
