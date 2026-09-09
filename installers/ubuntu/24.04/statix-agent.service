@@ -15,6 +15,10 @@ ExecStart=/usr/local/bin/statix-agent run
 Restart=always
 RestartSec=5s
 KillSignal=SIGINT
+# Deployed project runtimes are intentionally longer-lived than the agent
+# control plane. Keep them alive while the agent is upgraded or restarted;
+# the next agent instance discovers them from its persisted runtime state.
+KillMode=process
 TimeoutStopSec=20s
 
 User=statix-agent
