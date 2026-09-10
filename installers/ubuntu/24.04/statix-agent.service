@@ -36,7 +36,7 @@ ProtectSystem=strict
 # actually consumes explicitly allow-listed below.
 InaccessiblePaths=/boot /home /media /mnt /root /srv
 # LXC needs these paths writable while creating and mounting guests.
-ReadWritePaths=/run/lxc -/usr/lib/x86_64-linux-gnu/lxc/rootfs -/usr/lib/aarch64-linux-gnu/lxc/rootfs
+ReadWritePaths=/run/lxc /run/statix-agent -/usr/lib/x86_64-linux-gnu/lxc/rootfs -/usr/lib/aarch64-linux-gnu/lxc/rootfs
 ProtectControlGroups=false
 ProtectKernelTunables=false
 ProtectKernelModules=true

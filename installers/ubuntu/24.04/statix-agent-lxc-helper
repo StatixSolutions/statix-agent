@@ -54,7 +54,9 @@ if [[ "$operation" == network-ensure ]]; then
   fi
 
   if ! ss -lunH 2>/dev/null | grep -Eq "[[:space:]](${gateway//./\\.}|0\\.0\\.0\\.0|\\*):53[[:space:]]"; then
-    pidfile="/run/statix-agent-lxc-dnsmasq.pid"
+    runtime_dir="/run/statix-agent"
+    install -d -m 0755 "$runtime_dir"
+    pidfile="$runtime_dir/lxc-dnsmasq.pid"
     if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
       fail "agent-managed dnsmasq is running but DNS is not listening on $gateway"
     fi
