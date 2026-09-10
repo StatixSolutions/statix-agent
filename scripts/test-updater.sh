@@ -138,6 +138,15 @@ check() {
   "$@"
 }
 
+assert_regular_file() {
+  local path="$1"
+  if [[ ! -f "$path" ]]; then
+    printf 'expected regular file: %s\n' "$path" >&2
+    ls -la "$(dirname "$path")" >&2
+    return 1
+  fi
+}
+
 make_migration_assets success
 printf 'old-agent\n' >"$install_root/statix-agent"
 printf '{"schemaVersion":1,"lastMigration":"0000"}\n' >"$state_root/migrations-state-before"
@@ -147,7 +156,7 @@ check 'new binary installed' assert_file_contains "$install_root/statix-agent" '
 check 'migration ran once' assert_file_contains "$state_root/migration-runs" '1'
 check 'migration state recorded' grep -Fq '0001-test-state' "$state_root/migrations/state.json"
 check 'dependency helper ran' test -s "$tmp_root/dependency-installed"
-check 'LXC helper installed' test -f "$install_root/statix-agent-lxc"
+check 'LXC helper installed' assert_regular_file "$install_root/statix-agent-lxc"
 
 check 'idempotent update' run_update
 check 'migration was not repeated' assert_file_contains "$state_root/migration-runs" '1'

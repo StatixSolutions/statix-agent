@@ -171,6 +171,7 @@ repair_lxc_helper() {
   log "downloading LXC helper from $helper_url"
   download_verified "$helper_url" "$temporary"
   install -d -m 0755 "$(dirname "$LXC_HELPER_PATH")"
+  log "installing LXC helper at $LXC_HELPER_PATH"
   install -o root -g root -m 0755 "$temporary" "$LXC_HELPER_PATH"
   rm -f "$temporary"
 }
