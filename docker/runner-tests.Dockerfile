@@ -23,7 +23,7 @@ COPY installers/ubuntu/24.04/statix-agent.service /etc/systemd/system/statix-age
 COPY scripts/run-runner-tests-service.sh /opt/statix/run-runner-tests-service.sh
 RUN chmod 0755 /usr/local/libexec/statix-agent-lxc \
     && printf '%s\n' \
-    'Defaults!/usr/local/libexec/statix-agent-lxc env_keep += "STATIX_AGENT_STATE_DIR STATE_DIRECTORY"' \
+    'Defaults!/usr/local/libexec/statix-agent-lxc env_keep += "STATIX_AGENT_STATE_DIR STATE_DIRECTORY STATIX_LXC_NETWORK_BRIDGE STATIX_LXC_NETWORK_GATEWAY"' \
     'statix-agent ALL=(root) NOPASSWD: /usr/bin/systemctl start statix-agent-update.service' \
     'statix-agent ALL=(root) NOPASSWD: /usr/local/libexec/statix-agent-lxc *' \
     > /etc/sudoers.d/statix-agent \

@@ -17,7 +17,9 @@ let
     pkgs.qemu_kvm
   ];
   lxcRuntimeDeps = [
+    pkgs.dnsmasq
     pkgs.lxc
+    pkgs.iptables
     pkgs.wget
     pkgs.xz
   ];
