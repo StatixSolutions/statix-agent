@@ -82,9 +82,11 @@ chmod 0755 "$asset_root/statix-agent-dependencies.sh"
 
 printf 'new-agent\n' >"$asset_root/statix-agent-linux-amd64"
 printf 'new-helper\n' >"$asset_root/statix-agent-lxc-helper"
+printf 'new-updater\n' >"$asset_root/statix-agent-update-ubuntu-24.04.sh"
 printf '{"version":"test-new"}\n' >"$asset_root/version.json"
 sha256sum "$asset_root/statix-agent-linux-amd64" >"$asset_root/statix-agent-linux-amd64.sha256"
 sha256sum "$asset_root/statix-agent-lxc-helper" >"$asset_root/statix-agent-lxc-helper.sha256"
+sha256sum "$asset_root/statix-agent-update-ubuntu-24.04.sh" >"$asset_root/statix-agent-update-ubuntu-24.04.sh.sha256"
 sha256sum "$asset_root/statix-agent-dependencies.sh" >"$asset_root/statix-agent-dependencies.sh.sha256"
 
 make_migration_assets() {
@@ -130,6 +132,7 @@ run_update() {
     STATIX_SERVICE_PATH="$install_root/statix-agent.service" \
     STATIX_DEPENDENCIES_PATH="$install_root/dependencies.sh" \
     STATIX_LXC_HELPER_PATH="$install_root/statix-agent-lxc" \
+    STATIX_UPDATE_SCRIPT_PATH="$install_root/update.sh" \
     bash "$repo_root/installers/ubuntu/24.04/update.sh"
 }
 
@@ -190,6 +193,13 @@ check 'migration ran once' assert_file_contains "$state_root/migration-runs" '1'
 check 'migration state recorded' grep -Fq '0001-test-state' "$state_root/migrations/state.json"
 check 'dependency helper ran' test -s "$tmp_root/dependency-installed"
 check 'LXC helper installed' assert_regular_file "$install_root/statix-agent-lxc"
+check 'updater installed' assert_file_contains "$install_root/update.sh" 'new-updater'
+
+printf 'old-agent\n' >"$install_root/statix-agent"
+printf '%064d\n' 0 >"$asset_root/statix-agent-update-ubuntu-24.04.sh.sha256"
+expect_failure 'invalid updater checksum is rejected' run_update
+check 'binary unchanged after updater failure' assert_file_contains "$install_root/statix-agent" 'old-agent'
+sha256sum "$asset_root/statix-agent-update-ubuntu-24.04.sh" >"$asset_root/statix-agent-update-ubuntu-24.04.sh.sha256"
 
 check 'idempotent update' run_update
 check 'migration was not repeated' assert_file_contains "$state_root/migration-runs" '1'

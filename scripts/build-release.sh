@@ -180,13 +180,16 @@ EOF
 
   install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-install-ubuntu-24.04.sh" "${UPLOAD_ROOT}/statix-agent-install-ubuntu-24.04.sh"
   install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-update-ubuntu-24.04.sh" "${UPLOAD_ROOT}/statix-agent-update-ubuntu-24.04.sh"
+  sha256sum "${UPLOAD_ROOT}/statix-agent-update-ubuntu-24.04.sh" > "${UPLOAD_ROOT}/statix-agent-update-ubuntu-24.04.sh.sha256"
   install -m 0644 "${UBUNTU_INSTALLER_ROOT}/statix-agent.service" "${UPLOAD_ROOT}/statix-agent.service"
   install -m 0644 "${UBUNTU_INSTALLER_ROOT}/statix-agent-update.service" "${UPLOAD_ROOT}/statix-agent-update.service"
 
   install -m 0755 "${ARCH_INSTALLER_ROOT}/statix-agent-install-archlinux.sh" "${UPLOAD_ROOT}/statix-agent-install-archlinux.sh"
   install -m 0755 "${ARCH_INSTALLER_ROOT}/statix-agent-update-archlinux.sh" "${UPLOAD_ROOT}/statix-agent-update-archlinux.sh"
+  sha256sum "${UPLOAD_ROOT}/statix-agent-update-archlinux.sh" > "${UPLOAD_ROOT}/statix-agent-update-archlinux.sh.sha256"
   install -m 0755 "${DEBIAN_INSTALLER_ROOT}/statix-agent-install-debian.sh" "${UPLOAD_ROOT}/statix-agent-install-debian.sh"
   install -m 0755 "${DEBIAN_INSTALLER_ROOT}/statix-agent-update-debian.sh" "${UPLOAD_ROOT}/statix-agent-update-debian.sh"
+  sha256sum "${UPLOAD_ROOT}/statix-agent-update-debian.sh" > "${UPLOAD_ROOT}/statix-agent-update-debian.sh.sha256"
   install -m 0644 "${METADATA_ROOT}/version.json" "${UPLOAD_ROOT}/version.json"
   install -m 0755 "${UBUNTU_INSTALLER_ROOT}/statix-agent-lxc-helper" "${UPLOAD_ROOT}/statix-agent-lxc-helper"
   sha256sum "${UPLOAD_ROOT}/statix-agent-lxc-helper" > "${UPLOAD_ROOT}/statix-agent-lxc-helper.sha256"
