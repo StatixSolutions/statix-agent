@@ -3,11 +3,13 @@ set -Eeuo pipefail
 
 readonly SERVICE_NAME="statix-agent"
 readonly DEFAULT_DOWNLOAD_BASE_URL="https://github.com/StatixSolutions/statix-agent/releases/latest/download"
+readonly UPDATE_SCRIPT_ASSET_NAME="statix-agent-update-archlinux.sh"
 readonly DEPENDENCIES_ASSET_NAME="statix-agent-dependencies.sh"
 readonly MIGRATIONS_ARCHIVE_NAME="statix-agent-migrations.tar.gz"
 readonly MIGRATIONS_MANIFEST_NAME="statix-agent-migrations.json"
 
 DOWNLOAD_BASE_URL="${STATIX_DOWNLOAD_BASE_URL:-$DEFAULT_DOWNLOAD_BASE_URL}"
+UPDATE_SCRIPT_PATH="${STATIX_UPDATE_SCRIPT_PATH:-/usr/local/lib/statix/update.sh}"
 BINARY_PATH="${STATIX_BINARY_PATH:-/usr/local/bin/statix-agent}"
 VERSION_FILE="${STATIX_VERSION_FILE:-/opt/statix/version.json}"
 SERVICE_PATH="${STATIX_SERVICE_PATH:-/etc/systemd/system/$SERVICE_NAME.service}"
@@ -78,6 +80,23 @@ download_verified() {
   local destination="$2"
   download_file "$url" "$destination" || fail "failed to download $url"
   verify_sha256 "$destination" "$url.sha256"
+}
+
+refresh_updater() {
+  local updater_url temporary staged
+  updater_url="${STATIX_UPDATE_SCRIPT_URL:-$DOWNLOAD_BASE_URL/$UPDATE_SCRIPT_ASSET_NAME}"
+  temporary="$(mktemp)"
+  install -d -m 0755 "$(dirname "$UPDATE_SCRIPT_PATH")"
+  staged="$(mktemp "$(dirname "$UPDATE_SCRIPT_PATH")/.update.XXXXXX")"
+  trap 'rm -f "$temporary" "$staged"' RETURN
+
+  log "downloading updater from $updater_url"
+  download_verified "$updater_url" "$temporary"
+  install -o root -g root -m 0755 "$temporary" "$staged"
+  mv -f "$staged" "$UPDATE_SCRIPT_PATH"
+  rm -f "$temporary"
+  trap - RETURN
+  log "installed updater at $UPDATE_SCRIPT_PATH"
 }
 
 acquire_update_lock() {
@@ -200,6 +219,7 @@ main() {
   DOWNLOAD_BASE_URL="${DOWNLOAD_BASE_URL%/}"
   bootstrap_curl
   acquire_update_lock
+  refresh_updater
   apply_migrations
   repair_dependencies
   repair_lxc_helper
