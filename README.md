@@ -47,6 +47,13 @@ hosts with the platform installer once, because older updater scripts cannot
 execute migrations they do not contain. Subsequent updates apply pending
 migrations automatically.
 
+Agent upgrades are control-plane updates. The service units use
+`KillMode=process` so long-lived deployed LXC/Docker runtimes and project
+MicroVM processes are not stopped when the agent is restarted. Runtime state is
+kept under the agent state directory so a new agent instance can reconnect to
+existing workloads. Release validation must prove that deployed application
+traffic remains healthy throughout an update.
+
 ## Local build
 
 ```bash
@@ -69,8 +76,9 @@ can also be started manually. Independent `Unit tests` and `Runner integration
 tests` jobs run on Ubuntu 24.04, with 15- and 45-minute timeouts respectively.
 New commits cancel superseded runs for the same PR.
 
-Run the same checks locally with `just test` (`cargo test --locked --all-targets`)
-and `just test-runners`. CI uses stable Rust and the committed Cargo lockfile.
+Run the same checks locally with `just test` (`cargo test --locked --all-targets`),
+`sudo just test-updater`, and `just test-runners`. CI uses stable Rust and the
+committed Cargo lockfile.
 The integration job verifies Docker and usable `/dev/kvm`, then runs both ignored
 runner tests serially as `statix-agent` under the shipped Ubuntu systemd service
 policy in a privileged test container. Missing prerequisites

@@ -142,6 +142,14 @@ apply_migrations() {
     write_migration_state "$migration_id"
     last_migration="$migration_id"
   done
+
+  # RETURN traps run after local variables have gone out of scope when this
+  # function returns. Clear the trap and clean up while the locals are still
+  # defined, otherwise set -u reports an unbound variable after a successful
+  # migration run.
+  trap - RETURN
+  rm -f "$archive" "$manifest"
+  rm -rf "$extraction_dir"
 }
 
 repair_dependencies() {
@@ -163,6 +171,7 @@ repair_lxc_helper() {
   log "downloading LXC helper from $helper_url"
   download_verified "$helper_url" "$temporary"
   install -d -m 0755 "$(dirname "$LXC_HELPER_PATH")"
+  log "installing LXC helper at $LXC_HELPER_PATH"
   install -o root -g root -m 0755 "$temporary" "$LXC_HELPER_PATH"
   rm -f "$temporary"
 }
@@ -194,7 +203,7 @@ main() {
   apply_migrations
   repair_dependencies
   repair_lxc_helper
-  local arch binary_url temporary backup version_url version_tmp
+  local arch binary_url temporary backup version_url version_tmp start_status
   arch="$(detect_arch)"
   binary_url="${STATIX_AGENT_BINARY_URL:-$DOWNLOAD_BASE_URL/statix-agent-linux-$arch}"
   temporary="$(mktemp)"
@@ -223,8 +232,9 @@ main() {
   rm -f "$version_tmp" "$temporary"
 
   systemctl daemon-reload
-  systemctl start "$SERVICE_NAME"
-  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+  start_status=0
+  systemctl start "$SERVICE_NAME" || start_status=$?
+  if (( start_status != 0 )) || ! systemctl is-active --quiet "$SERVICE_NAME"; then
     log "new agent did not start; restoring previous binary"
     if [[ -s "$backup" ]]; then
       install -m 0755 "$backup" "$BINARY_PATH"
