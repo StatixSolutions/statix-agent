@@ -151,6 +151,17 @@ check() {
   fi
 }
 
+expect_failure() {
+  local name="$1"
+  shift
+  printf '[updater-test] %s\n' "$name"
+  if "$@"; then
+    printf '[updater-test] FAILED: command unexpectedly succeeded: %s\n' "$name" >&2
+    return 1
+  fi
+  printf '[updater-test] expected failure observed: %s\n' "$name"
+}
+
 assert_regular_file() {
   local path="$1"
   if [[ ! -f "$path" ]]; then
@@ -177,20 +188,14 @@ check 'migration was not repeated' assert_file_contains "$state_root/migration-r
 printf 'old-agent\n' >"$install_root/statix-agent"
 rm -f "$state_root/migrations/state.json" "$tmp_root/fail-start"
 make_migration_assets failure
-if check 'failed migration is rejected' run_update; then
-  printf 'failing migration unexpectedly succeeded\n' >&2
-  exit 1
-fi
+expect_failure 'failed migration is rejected' run_update
 check 'old binary retained after migration failure' assert_file_contains "$install_root/statix-agent" 'old-agent'
 check 'migration state not advanced' test ! -e "$state_root/migrations/state.json"
 
 make_migration_assets success
 rm -f "$state_root/migrations/state.json"
 touch "$tmp_root/fail-start"
-if check 'failed service start is rejected' run_update; then
-  printf 'failed service start unexpectedly succeeded\n' >&2
-  exit 1
-fi
+expect_failure 'failed service start is rejected' run_update
 check 'old binary restored after service failure' assert_file_contains "$install_root/statix-agent" 'old-agent'
 
 printf 'updater tests passed\n'
