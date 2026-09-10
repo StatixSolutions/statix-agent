@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+trap 'rc=$?; printf "[updater-test] failure at line %s (exit %s): %s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
+
 if [[ "${EUID}" -ne 0 ]]; then
   printf 'updater tests must run as root (use sudo)\n' >&2
   exit 1
@@ -66,7 +68,7 @@ cat >"$asset_root/statix-agent-dependencies.sh" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 [[ "${1:-}" == --install ]] || exit 2
-touch "$TEST_DEPENDENCY_INSTALLED"
+printf 'installed\n' >"$TEST_DEPENDENCY_INSTALLED"
 EOF
 chmod 0755 "$asset_root/statix-agent-dependencies.sh"
 
@@ -135,7 +137,18 @@ check() {
   local name="$1"
   shift
   printf '[updater-test] %s\n' "$name"
-  "$@"
+  if ! "$@"; then
+    printf '[updater-test] FAILED: %s\n' "$name" >&2
+    printf '[updater-test] command:' >&2
+    printf ' %q' "$@" >&2
+    printf '\n[updater-test] install tree:\n' >&2
+    find "$install_root" -maxdepth 2 -printf '%M %u:%g %p\n' >&2 2>/dev/null || true
+    printf '[updater-test] state tree:\n' >&2
+    find "$state_root" -maxdepth 3 -printf '%M %u:%g %p\n' >&2 2>/dev/null || true
+    printf '[updater-test] systemctl calls:\n' >&2
+    cat "$tmp_root/systemctl.log" >&2 2>/dev/null || true
+    return 1
+  fi
 }
 
 assert_regular_file() {
