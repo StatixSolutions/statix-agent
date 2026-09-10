@@ -203,7 +203,7 @@ main() {
   apply_migrations
   repair_dependencies
   repair_lxc_helper
-  local arch binary_url temporary backup version_url version_tmp
+  local arch binary_url temporary backup version_url version_tmp start_status
   arch="$(detect_arch)"
   binary_url="${STATIX_AGENT_BINARY_URL:-$DOWNLOAD_BASE_URL/statix-agent-linux-$arch}"
   temporary="$(mktemp)"
@@ -232,8 +232,9 @@ main() {
   rm -f "$version_tmp" "$temporary"
 
   systemctl daemon-reload
-  systemctl start "$SERVICE_NAME"
-  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+  start_status=0
+  systemctl start "$SERVICE_NAME" || start_status=$?
+  if (( start_status != 0 )) || ! systemctl is-active --quiet "$SERVICE_NAME"; then
     log "new agent did not start; restoring previous binary"
     if [[ -s "$backup" ]]; then
       install -m 0755 "$backup" "$BINARY_PATH"

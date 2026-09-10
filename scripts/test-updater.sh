@@ -48,11 +48,19 @@ cat >"$fake_bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 case "${1:-}" in
-  stop|start|daemon-reload|enable)
+  stop|daemon-reload|enable)
     printf '%s\n' "$*" >>"$TEST_SYSTEMCTL_LOG"
     ;;
-  is-active)
+  start)
+    printf '%s\n' "$*" >>"$TEST_SYSTEMCTL_LOG"
     if [[ -f "$TEST_FAIL_START" ]]; then
+      printf '[fake-systemctl] injected start failure\n' >&2
+      exit 1
+    fi
+    ;;
+  is-active)
+    if [[ -f "$TEST_FAIL_ACTIVE" ]]; then
+      printf '[fake-systemctl] injected active-state failure\n' >&2
       exit 1
     fi
     ;;
@@ -113,6 +121,7 @@ run_update() {
     TEST_ASSET_ROOT="$asset_root" \
     TEST_SYSTEMCTL_LOG="$tmp_root/systemctl.log" \
     TEST_FAIL_START="$tmp_root/fail-start" \
+    TEST_FAIL_ACTIVE="$tmp_root/fail-active" \
     TEST_DEPENDENCY_INSTALLED="$tmp_root/dependency-installed" \
     STATIX_DOWNLOAD_BASE_URL="https://test.invalid/assets" \
     STATIX_AGENT_STATE_DIR="$state_root" \
@@ -194,8 +203,13 @@ check 'migration state not advanced' test ! -e "$state_root/migrations/state.jso
 
 make_migration_assets success
 rm -f "$state_root/migrations/state.json"
+touch "$tmp_root/fail-active"
+expect_failure 'failed active-state check is rejected' run_update
+check 'old binary restored after service failure' assert_file_contains "$install_root/statix-agent" 'old-agent'
+
+rm -f "$tmp_root/fail-active"
 touch "$tmp_root/fail-start"
 expect_failure 'failed service start is rejected' run_update
-check 'old binary restored after service failure' assert_file_contains "$install_root/statix-agent" 'old-agent'
+check 'old binary restored after start failure' assert_file_contains "$install_root/statix-agent" 'old-agent'
 
 printf 'updater tests passed\n'
