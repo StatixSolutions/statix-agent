@@ -40,15 +40,26 @@ if [[ "$operation" == network-ensure ]]; then
   command -v iptables >/dev/null 2>&1 || fail "iptables is required to configure LXC networking"
 
   ip link show dev "$bridge" >/dev/null 2>&1 || ip link add name "$bridge" type bridge
-  ip -4 addr show dev "$bridge" | grep -q ' inet ' || ip addr add "$gateway_cidr" dev "$bridge"
+  mapfile -t bridge_ipv4_cidrs < <(ip -4 -o addr show dev "$bridge" scope global | awk '{print $4}')
+  if (( ${#bridge_ipv4_cidrs[@]} == 0 )); then
+    ip addr add "$gateway_cidr" dev "$bridge"
+  elif (( ${#bridge_ipv4_cidrs[@]} != 1 )) || [[ "${bridge_ipv4_cidrs[0]}" != "$gateway_cidr" ]]; then
+    fail "bridge $bridge has conflicting IPv4 configuration: ${bridge_ipv4_cidrs[*]} (expected $gateway_cidr)"
+  fi
   ip link set dev "$bridge" up
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-  subnet="$(ip -4 route show dev "$bridge" scope link | awk 'NR == 1 {print $1}')"
+  subnet="$(ip -4 route show dev "$bridge" scope link | awk -v gateway="$gateway" '{for (i = 1; i < NF; i++) if ($i == "src" && $(i + 1) == gateway) {print $1; exit}}')"
   [[ -n "$subnet" ]] || fail "could not determine subnet for $bridge"
   egress="$(ip -4 route show default | awk 'NR == 1 {for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
   [[ -n "$egress" ]] || fail "could not determine default IPv4 egress interface"
 
+  if ! iptables -C FORWARD -i "$bridge" -o "$egress" -s "$subnet" -j ACCEPT >/dev/null 2>&1; then
+    iptables -A FORWARD -i "$bridge" -o "$egress" -s "$subnet" -j ACCEPT
+  fi
+  if ! iptables -C FORWARD -i "$egress" -o "$bridge" -d "$subnet" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1; then
+    iptables -A FORWARD -i "$egress" -o "$bridge" -d "$subnet" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  fi
   if ! iptables -t nat -C POSTROUTING -s "$subnet" -o "$egress" -j MASQUERADE >/dev/null 2>&1; then
     iptables -t nat -A POSTROUTING -s "$subnet" -o "$egress" -j MASQUERADE
   fi
