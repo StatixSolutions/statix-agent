@@ -80,7 +80,8 @@ fn context(name: &str) -> ExecutionContext {
     ExecutionContext {
         job_id: format!("integration-{name}"),
         attempt_id: format!("attempt-{name}"),
-        timeout_seconds: 300,
+        // Provisioning Docker can exceed five minutes on cold or slow package mirrors.
+        timeout_seconds: 600,
         log_tx: None,
     }
 }

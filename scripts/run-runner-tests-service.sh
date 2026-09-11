@@ -24,7 +24,7 @@ ExecStart=
 ExecStart=/opt/statix/runner-tests jobs::runners::integration_tests:: --ignored --test-threads=1 --nocapture
 Environment=STATIX_MICROVM_TEST_IMAGE=/fixtures/test.qcow2
 Environment=STATIX_RUNNER_TEST_SYSTEMD=1
-TimeoutStartSec=15min
+TimeoutStartSec=30min
 EOF
 systemctl daemon-reload
 systemctl cat statix-agent.service

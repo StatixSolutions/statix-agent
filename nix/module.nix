@@ -18,10 +18,12 @@ let
   ];
   lxcRuntimeDeps = [
     pkgs.dnsmasq
+    pkgs.gawk
     pkgs.iproute2
     pkgs.lxc
     pkgs.iptables
     pkgs.procps
+    pkgs.util-linux
     pkgs.wget
     pkgs.xz
   ];

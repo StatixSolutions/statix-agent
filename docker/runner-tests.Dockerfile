@@ -10,7 +10,7 @@ RUN cargo test --locked --bin statix-agent --no-run \
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cloud-image-utils dnsmasq iptables lxc lxc-templates openssh-client qemu-system-x86 qemu-utils sudo wget xz-utils \
+    cloud-image-utils dnsmasq gawk iptables lxc lxc-templates openssh-client qemu-system-x86 qemu-utils sudo util-linux wget xz-utils \
     ca-certificates git systemd systemd-sysv \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin statix-agent \

@@ -38,6 +38,13 @@ if [[ "$operation" == network-ensure ]]; then
   command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq is required to configure LXC networking"
   command -v ss >/dev/null 2>&1 || fail "ss is required to configure LXC networking"
   command -v iptables >/dev/null 2>&1 || fail "iptables is required to configure LXC networking"
+  command -v awk >/dev/null 2>&1 || fail "awk is required to configure LXC networking"
+  command -v flock >/dev/null 2>&1 || fail "flock is required to configure LXC networking"
+
+  runtime_dir="/run/statix-agent"
+  install -d -m 0755 "$runtime_dir"
+  exec {network_lock_fd}>"$runtime_dir/lxc-network.lock"
+  flock --exclusive "$network_lock_fd"
 
   ip link show dev "$bridge" >/dev/null 2>&1 || ip link add name "$bridge" type bridge
   mapfile -t bridge_ipv4_cidrs < <(ip -4 -o addr show dev "$bridge" scope global | awk '{print $4}')
@@ -65,15 +72,13 @@ if [[ "$operation" == network-ensure ]]; then
   fi
 
   if ! ss -lunH 2>/dev/null | grep -Eq "[[:space:]](${gateway//./\\.}|0\\.0\\.0\\.0|\\*):53[[:space:]]"; then
-    runtime_dir="/run/statix-agent"
-    install -d -m 0755 "$runtime_dir"
     pidfile="$runtime_dir/lxc-dnsmasq.pid"
     if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
       fail "agent-managed dnsmasq is running but DNS is not listening on $gateway"
     fi
     rm -f "$pidfile"
     dnsmasq --conf-file=/dev/null --interface="$bridge" --bind-interfaces --listen-address="$gateway" \
-      --no-dhcp-interface="$bridge" --pid-file="$pidfile"
+      --no-dhcp-interface="$bridge" --pid-file="$pidfile" {network_lock_fd}>&-
   fi
   exit 0
 fi
