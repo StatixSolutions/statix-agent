@@ -100,7 +100,8 @@ Ubuntu 24.04 container running systemd. The shipped Ubuntu service unit runs the
 real LXC and MicroVM workflows as `statix-agent`, with its filesystem and privilege
 restrictions intact. Only the test command, test environment, restart behavior,
 and timeout are overridden. The production LXC helper and narrow sudoers rule
-are installed; networking is prepared outside the service.
+are installed; the agent automatically prepares the configured LXC bridge,
+forwarding, DNS listener, and NAT rules before running LXC jobs.
 
 Test state and workspaces live beneath the service's `StateDirectory`. The VM
 fixture is mounted read-only, and no host repository directory is mounted.

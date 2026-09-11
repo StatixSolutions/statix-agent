@@ -16,21 +16,21 @@ require_root() {
 
 ubuntu_packages() {
   printf '%s\n' \
-    ca-certificates curl cloud-image-utils iproute2 lxc lxc-templates \
+    ca-certificates curl cloud-image-utils dnsmasq gawk iproute2 iptables lxc lxc-templates util-linux \
     xz-utils pciutils qemu-system-arm qemu-system-x86 qemu-utils \
     openssh-client uidmap wget sudo systemd
 }
 
 debian_packages() {
   printf '%s\n' \
-    ca-certificates curl cloud-image-utils iproute2 lxc lxc-templates \
+    ca-certificates curl cloud-image-utils dnsmasq gawk iproute2 iptables lxc lxc-templates util-linux \
     xz-utils pciutils qemu-system-arm qemu-system-x86 qemu-utils \
     openssh-client uidmap wget sudo systemd
 }
 
 arch_packages() {
   printf '%s\n' \
-    ca-certificates curl iproute2 lxc xz pciutils sudo \
+    ca-certificates curl dnsmasq gawk iproute2 iptables lxc util-linux xz pciutils sudo \
     wget qemu-desktop openssh cloud-init
 }
 
@@ -74,7 +74,7 @@ install_packages() {
 
 required_commands() {
   printf '%s\n' \
-    curl sha256sum systemctl ip tar sudo \
+    awk curl flock sha256sum systemctl ip ss tar sudo dnsmasq iptables \
     lxc-create lxc-start lxc-wait lxc-attach lxc-stop lxc-destroy \
     qemu-img qemu-system-x86_64 qemu-system-aarch64 cloud-localds \
     ssh-keygen ssh scp

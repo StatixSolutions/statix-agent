@@ -10,7 +10,7 @@ RUN cargo test --locked --bin statix-agent --no-run \
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cloud-image-utils dnsmasq iptables lxc lxc-templates openssh-client qemu-system-x86 qemu-utils sudo wget xz-utils \
+    cloud-image-utils dnsmasq gawk iptables lxc lxc-templates openssh-client qemu-system-x86 qemu-utils sudo util-linux wget xz-utils \
     ca-certificates git systemd systemd-sysv \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin statix-agent \
@@ -23,7 +23,7 @@ COPY installers/ubuntu/24.04/statix-agent.service /etc/systemd/system/statix-age
 COPY scripts/run-runner-tests-service.sh /opt/statix/run-runner-tests-service.sh
 RUN chmod 0755 /usr/local/libexec/statix-agent-lxc \
     && printf '%s\n' \
-    'Defaults!/usr/local/libexec/statix-agent-lxc env_keep += "STATIX_AGENT_STATE_DIR STATE_DIRECTORY"' \
+    'Defaults!/usr/local/libexec/statix-agent-lxc env_keep += "STATIX_AGENT_STATE_DIR STATE_DIRECTORY STATIX_LXC_NETWORK_BRIDGE STATIX_LXC_NETWORK_GATEWAY"' \
     'statix-agent ALL=(root) NOPASSWD: /usr/bin/systemctl start statix-agent-update.service' \
     'statix-agent ALL=(root) NOPASSWD: /usr/local/libexec/statix-agent-lxc *' \
     > /etc/sudoers.d/statix-agent \
