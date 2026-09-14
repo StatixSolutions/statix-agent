@@ -38,9 +38,9 @@ jobs:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
               apt-get install -y --no-install-recommends \
-                ca-certificates curl cloud-image-utils iproute2 lxc lxc-templates \
-                xz-utils pciutils qemu-system-arm qemu-system-x86 qemu-utils \
-                openssh-client uidmap wget sudo systemd
+                ca-certificates curl cloud-image-utils dnsmasq gawk iproute2 iptables \
+                lxc lxc-templates procps util-linux xz-utils pciutils qemu-system-arm \
+                qemu-system-x86 qemu-utils openssh-client uidmap wget sudo systemd
               /repo/installers/common/statix-agent-dependencies.sh --check
             '
 
