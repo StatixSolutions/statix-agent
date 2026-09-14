@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 readonly SERVICE_NAME="statix-agent"
+readonly SERVICE_USER="${STATIX_SERVICE_USER:-statix-agent}"
 readonly DEFAULT_DOWNLOAD_BASE_URL="https://github.com/StatixSolutions/statix-agent/releases/latest/download"
 readonly UPDATE_SCRIPT_ASSET_NAME="statix-agent-update-ubuntu-24.04.sh"
 readonly DEPENDENCIES_ASSET_NAME="statix-agent-dependencies.sh"
@@ -13,9 +14,12 @@ UPDATE_SCRIPT_PATH="${STATIX_UPDATE_SCRIPT_PATH:-/usr/local/lib/statix/update.sh
 BINARY_PATH="${STATIX_BINARY_PATH:-/usr/local/bin/statix-agent}"
 VERSION_FILE="${STATIX_VERSION_FILE:-/opt/statix/version.json}"
 SERVICE_PATH="${STATIX_SERVICE_PATH:-/etc/systemd/system/$SERVICE_NAME.service}"
+SUDOERS_PATH="${STATIX_AGENT_SUDOERS_PATH:-/etc/sudoers.d/$SERVICE_NAME}"
 DEPENDENCIES_PATH="${STATIX_DEPENDENCIES_PATH:-/usr/local/lib/statix/statix-agent-dependencies.sh}"
 LXC_HELPER_PATH="${STATIX_LXC_HELPER_PATH:-/usr/local/libexec/statix-agent-lxc}"
 LXC_HELPER_URL="${STATIX_LXC_HELPER_URL:-$DOWNLOAD_BASE_URL/statix-agent-lxc-helper}"
+NETWORK_HELPER_PATH="${STATIX_NETWORK_HELPER_PATH:-/usr/local/libexec/statix-agent-network}"
+NETWORK_HELPER_URL="${STATIX_NETWORK_HELPER_URL:-$DOWNLOAD_BASE_URL/statix-agent-network-helper}"
 STATE_ROOT="${STATIX_AGENT_STATE_DIR:-/var/lib/statix-agent}"
 MIGRATIONS_STATE_DIR="$STATE_ROOT/migrations"
 MIGRATIONS_STATE_PATH="$MIGRATIONS_STATE_DIR/state.json"
@@ -195,6 +199,35 @@ repair_lxc_helper() {
   rm -f "$temporary"
 }
 
+repair_network_helper() {
+  local temporary
+  temporary="$(mktemp)"
+  log "downloading network helper from $NETWORK_HELPER_URL"
+  download_verified "$NETWORK_HELPER_URL" "$temporary"
+  install -d -m 0755 "$(dirname "$NETWORK_HELPER_PATH")"
+  log "installing network helper at $NETWORK_HELPER_PATH"
+  install -o root -g root -m 0755 "$temporary" "$NETWORK_HELPER_PATH"
+  rm -f "$temporary"
+}
+
+repair_sudoers() {
+  local temporary
+  temporary="$(mktemp)"
+  cat >"$temporary" <<EOF
+Defaults!$LXC_HELPER_PATH env_keep += "STATIX_AGENT_STATE_DIR STATE_DIRECTORY STATIX_LXC_NETWORK_BRIDGE STATIX_LXC_NETWORK_GATEWAY"
+Defaults!$NETWORK_HELPER_PATH env_keep += "STATIX_AGENT_STATE_DIR STATE_DIRECTORY"
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start $SERVICE_NAME-update.service
+$SERVICE_USER ALL=(root) NOPASSWD: $LXC_HELPER_PATH *
+$SERVICE_USER ALL=(root) NOPASSWD: $NETWORK_HELPER_PATH apply $STATE_ROOT/network/nginx-exposures.conf
+EOF
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "$temporary" >/dev/null
+  fi
+  install -d -m 0755 "$(dirname "$SUDOERS_PATH")"
+  install -m 0440 "$temporary" "$SUDOERS_PATH"
+  rm -f "$temporary"
+}
+
 bootstrap_curl() {
   if command -v curl >/dev/null 2>&1; then
     return
@@ -223,6 +256,8 @@ main() {
   apply_migrations
   repair_dependencies
   repair_lxc_helper
+  repair_network_helper
+  repair_sudoers
   local arch binary_url temporary backup version_url version_tmp start_status
   arch="$(detect_arch)"
   binary_url="${STATIX_AGENT_BINARY_URL:-$DOWNLOAD_BASE_URL/statix-agent-linux-$arch}"

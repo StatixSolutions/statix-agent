@@ -11,9 +11,28 @@ fail() {
 
 [[ "${1:-}" == apply ]] || fail "only apply is allowed"
 source_path="${2:-}"
-[[ -n "$source_path" && "$source_path" == "$STATE_ROOT"/* && -f "$source_path" ]] || fail "invalid configuration path"
+[[ "$source_path" == "$STATE_ROOT/network/nginx-exposures.conf" && -f "$source_path" ]] || fail "invalid configuration path"
+command -v nginx >/dev/null 2>&1 || fail "nginx is required to apply exposure routes"
+command -v systemctl >/dev/null 2>&1 || fail "systemctl is required to reload nginx"
 
 install -d -m 0755 "$(dirname "$DESTINATION")"
+if [[ -d /etc/nginx/modules-enabled ]]; then
+  stream_include="/etc/nginx/modules-enabled/99-statix-stream.conf"
+elif [[ -d /etc/nginx/modules.d ]]; then
+  stream_include="/etc/nginx/modules.d/99-statix-stream.conf"
+else
+  fail "nginx module configuration directory was not found"
+fi
+
+created_stream_include=0
+if [[ ! -f "$stream_include" ]]; then
+  include_temporary="${stream_include}.tmp"
+  printf 'stream { include /etc/nginx/streams-enabled/*.conf; }\n' >"$include_temporary"
+  chmod 0644 "$include_temporary"
+  mv "$include_temporary" "$stream_include"
+  created_stream_include=1
+fi
+
 temporary="${DESTINATION}.tmp"
 backup="${DESTINATION}.bak"
 had_previous=0
@@ -24,11 +43,14 @@ fi
 install -m 0644 "$source_path" "$temporary"
 mv "$temporary" "$DESTINATION"
 
-if ! nginx -t >/tmp/statix-agent-nginx-test.log 2>&1; then
+log_file="$(mktemp)"
+trap 'rm -f "$log_file"' EXIT
+if ! nginx -t >"$log_file" 2>&1; then
   if (( had_previous )); then mv "$backup" "$DESTINATION"; else rm -f "$DESTINATION"; fi
-  cat /tmp/statix-agent-nginx-test.log >&2
-  rm -f /tmp/statix-agent-nginx-test.log
+  if (( created_stream_include )); then rm -f "$stream_include"; fi
+  cat "$log_file" >&2
   exit 1
 fi
-rm -f "$backup" /tmp/statix-agent-nginx-test.log
-nginx -s reload
+rm -f "$backup"
+systemctl enable nginx >/dev/null
+systemctl reload-or-restart nginx

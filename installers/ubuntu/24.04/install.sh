@@ -21,6 +21,8 @@ UPDATE_SERVICE_PATH="${STATIX_UPDATE_SERVICE_PATH:-/etc/systemd/system/$SERVICE_
 SUDOERS_PATH="${STATIX_AGENT_SUDOERS_PATH:-/etc/sudoers.d/$SERVICE_NAME}"
 LXC_HELPER_PATH="${STATIX_LXC_HELPER_PATH:-/usr/local/libexec/statix-agent-lxc}"
 LXC_HELPER_URL="${STATIX_LXC_HELPER_URL:-$DOWNLOAD_BASE_URL/statix-agent-lxc-helper}"
+NETWORK_HELPER_PATH="${STATIX_NETWORK_HELPER_PATH:-/usr/local/libexec/statix-agent-network}"
+NETWORK_HELPER_URL="${STATIX_NETWORK_HELPER_URL:-$DOWNLOAD_BASE_URL/statix-agent-network-helper}"
 DEPENDENCIES_PATH="${STATIX_DEPENDENCIES_PATH:-/usr/local/lib/statix/statix-agent-dependencies.sh}"
 DEPENDENCIES_URL="${STATIX_DEPENDENCIES_URL:-$DOWNLOAD_BASE_URL/$DEPENDENCIES_ASSET_NAME}"
 STATE_DIR="${STATIX_AGENT_STATE_DIR:-/var/lib/statix-agent}"
@@ -141,6 +143,15 @@ install_lxc_helper() {
   download_file "$LXC_HELPER_URL" "$temporary" || fail "failed to download LXC helper"
   install -d -m 0755 "$(dirname "$LXC_HELPER_PATH")"
   install -o root -g root -m 0755 "$temporary" "$LXC_HELPER_PATH"
+  rm -f "$temporary"
+}
+
+install_network_helper() {
+  local temporary
+  temporary="$(mktemp)"
+  download_file "$NETWORK_HELPER_URL" "$temporary" || fail "failed to download network helper"
+  install -d -m 0755 "$(dirname "$NETWORK_HELPER_PATH")"
+  install -o root -g root -m 0755 "$temporary" "$NETWORK_HELPER_PATH"
   rm -f "$temporary"
 }
 
@@ -265,10 +276,15 @@ install_update_sudoers() {
 
   cat >"$temporary" <<EOF
 Defaults!$LXC_HELPER_PATH env_keep += "STATIX_AGENT_STATE_DIR STATE_DIRECTORY STATIX_LXC_NETWORK_BRIDGE STATIX_LXC_NETWORK_GATEWAY"
+Defaults!$NETWORK_HELPER_PATH env_keep += "STATIX_AGENT_STATE_DIR STATE_DIRECTORY"
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start $SERVICE_NAME-update.service
 $SERVICE_USER ALL=(root) NOPASSWD: $LXC_HELPER_PATH *
+$SERVICE_USER ALL=(root) NOPASSWD: $NETWORK_HELPER_PATH apply $STATE_DIR/network/nginx-exposures.conf
 EOF
 
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "$temporary" >/dev/null
+  fi
   install -d -m 0755 "$(dirname "$SUDOERS_PATH")"
   install -m 0440 "$temporary" "$SUDOERS_PATH"
   rm -f "$temporary"
@@ -315,6 +331,7 @@ main() {
   install_version_file
   install_update_script
   install_lxc_helper
+  install_network_helper
   configure_lxc_runtime
   write_environment_file
   install_service_file

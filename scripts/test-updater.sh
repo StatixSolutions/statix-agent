@@ -82,10 +82,12 @@ chmod 0755 "$asset_root/statix-agent-dependencies.sh"
 
 printf 'new-agent\n' >"$asset_root/statix-agent-linux-amd64"
 printf 'new-helper\n' >"$asset_root/statix-agent-lxc-helper"
+printf 'new-network-helper\n' >"$asset_root/statix-agent-network-helper"
 printf 'new-updater\n' >"$asset_root/statix-agent-update-ubuntu-24.04.sh"
 printf '{"version":"test-new"}\n' >"$asset_root/version.json"
 sha256sum "$asset_root/statix-agent-linux-amd64" >"$asset_root/statix-agent-linux-amd64.sha256"
 sha256sum "$asset_root/statix-agent-lxc-helper" >"$asset_root/statix-agent-lxc-helper.sha256"
+sha256sum "$asset_root/statix-agent-network-helper" >"$asset_root/statix-agent-network-helper.sha256"
 sha256sum "$asset_root/statix-agent-update-ubuntu-24.04.sh" >"$asset_root/statix-agent-update-ubuntu-24.04.sh.sha256"
 sha256sum "$asset_root/statix-agent-dependencies.sh" >"$asset_root/statix-agent-dependencies.sh.sha256"
 
@@ -132,6 +134,8 @@ run_update() {
     STATIX_SERVICE_PATH="$install_root/statix-agent.service" \
     STATIX_DEPENDENCIES_PATH="$install_root/dependencies.sh" \
     STATIX_LXC_HELPER_PATH="$install_root/statix-agent-lxc" \
+    STATIX_NETWORK_HELPER_PATH="$install_root/statix-agent-network" \
+    STATIX_AGENT_SUDOERS_PATH="$install_root/statix-agent.sudoers" \
     STATIX_UPDATE_SCRIPT_PATH="$install_root/update.sh" \
     bash "$repo_root/installers/ubuntu/24.04/update.sh"
 }
@@ -193,6 +197,8 @@ check 'migration ran once' assert_file_contains "$state_root/migration-runs" '1'
 check 'migration state recorded' grep -Fq '0001-test-state' "$state_root/migrations/state.json"
 check 'dependency helper ran' test -s "$tmp_root/dependency-installed"
 check 'LXC helper installed' assert_regular_file "$install_root/statix-agent-lxc"
+check 'network helper installed' assert_regular_file "$install_root/statix-agent-network"
+check 'network helper authorized' grep -Fq "$install_root/statix-agent-network apply $state_root/network/nginx-exposures.conf" "$install_root/statix-agent.sudoers"
 check 'updater installed' assert_file_contains "$install_root/update.sh" 'new-updater'
 
 printf 'old-agent\n' >"$install_root/statix-agent"
