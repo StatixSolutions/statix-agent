@@ -64,6 +64,17 @@ impl Runner for ContainerRunner {
         let workspace_tar = runtime_root.join(WORKSPACE_ARCHIVE);
         create_workspace_archive(&workspace_tar, &workspace.workdir).await?;
 
+        let network = crate::jobs::execute(
+            &crate::jobs::RunnerEnvironment::Host,
+            ctx,
+            workspace,
+            &super::lxc::network_command(),
+        )
+        .await?;
+        if network.status == "failed" {
+            return Ok(network);
+        }
+
         let mut container = LxcContainer::create(
             container_name.clone(),
             image.distribution.as_str(),

@@ -700,6 +700,16 @@ pub(crate) fn runtime_command(program: &str, name: &str, args: &[String]) -> Vec
     command
 }
 
+pub(crate) fn network_command() -> Vec<String> {
+    vec![
+        "sudo".to_string(),
+        "-n".to_string(),
+        "--preserve-env=STATIX_LXC_NETWORK_BRIDGE,STATIX_LXC_NETWORK_GATEWAY".to_string(),
+        lxc_helper_path().to_string(),
+        "network-ensure".to_string(),
+    ]
+}
+
 pub(crate) async fn runtime_ipv4(name: &str) -> Result<Ipv4Addr> {
     let output = lxc_command("lxc-info")
         .arg("-n")
@@ -836,5 +846,13 @@ mod tests {
         assert_eq!(command[7], "-P");
         assert!(command[8] == "/var/lib/lxc" || command[8].ends_with("/lxc/containers"));
         assert_eq!(&command[9..], ["--", "true"]);
+    }
+
+    #[test]
+    fn network_command_uses_privileged_helper_without_runtime_arguments() {
+        let command = super::network_command();
+        assert_eq!(command[0], "sudo");
+        assert_eq!(command[4], "network-ensure");
+        assert_eq!(command.len(), 5);
     }
 }

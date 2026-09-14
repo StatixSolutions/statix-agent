@@ -21,9 +21,67 @@ fail() {
 operation="$1"
 shift
 case "$operation" in
-  lxc-create|lxc-start|lxc-wait|lxc-attach|lxc-info|lxc-stop|lxc-destroy) ;;
+  network-ensure|lxc-create|lxc-start|lxc-wait|lxc-attach|lxc-info|lxc-stop|lxc-destroy) ;;
   *) fail "operation is not allowed: $operation" ;;
 esac
+
+if [[ "$operation" == network-ensure ]]; then
+  bridge="${STATIX_LXC_NETWORK_BRIDGE:-lxcbr0}"
+  [[ "$bridge" =~ ^[a-zA-Z0-9_.-]{1,15}$ ]] || fail "invalid bridge name"
+  gateway_cidr="${STATIX_LXC_NETWORK_GATEWAY:-10.0.3.1/24}"
+  gateway="${gateway_cidr%%/*}"
+  prefix="${gateway_cidr##*/}"
+  [[ "$gateway" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ && "$prefix" =~ ^[0-9]+$ && "$prefix" -le 30 ]] || fail "invalid network gateway"
+
+  command -v ip >/dev/null 2>&1 || fail "ip is required to configure LXC networking"
+  command -v sysctl >/dev/null 2>&1 || fail "sysctl is required to configure LXC networking"
+  command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq is required to configure LXC networking"
+  command -v ss >/dev/null 2>&1 || fail "ss is required to configure LXC networking"
+  command -v iptables >/dev/null 2>&1 || fail "iptables is required to configure LXC networking"
+  command -v awk >/dev/null 2>&1 || fail "awk is required to configure LXC networking"
+  command -v flock >/dev/null 2>&1 || fail "flock is required to configure LXC networking"
+
+  runtime_dir="/run/statix-agent"
+  install -d -m 0755 "$runtime_dir"
+  exec {network_lock_fd}>"$runtime_dir/lxc-network.lock"
+  flock --exclusive "$network_lock_fd"
+
+  ip link show dev "$bridge" >/dev/null 2>&1 || ip link add name "$bridge" type bridge
+  mapfile -t bridge_ipv4_cidrs < <(ip -4 -o addr show dev "$bridge" scope global | awk '{print $4}')
+  if (( ${#bridge_ipv4_cidrs[@]} == 0 )); then
+    ip addr add "$gateway_cidr" dev "$bridge"
+  elif (( ${#bridge_ipv4_cidrs[@]} != 1 )) || [[ "${bridge_ipv4_cidrs[0]}" != "$gateway_cidr" ]]; then
+    fail "bridge $bridge has conflicting IPv4 configuration: ${bridge_ipv4_cidrs[*]} (expected $gateway_cidr)"
+  fi
+  ip link set dev "$bridge" up
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+  subnet="$(ip -4 route show dev "$bridge" scope link | awk -v gateway="$gateway" '{for (i = 1; i < NF; i++) if ($i == "src" && $(i + 1) == gateway) {print $1; exit}}')"
+  [[ -n "$subnet" ]] || fail "could not determine subnet for $bridge"
+  egress="$(ip -4 route show default | awk 'NR == 1 {for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}')"
+  [[ -n "$egress" ]] || fail "could not determine default IPv4 egress interface"
+
+  if ! iptables -C FORWARD -i "$bridge" -o "$egress" -s "$subnet" -j ACCEPT >/dev/null 2>&1; then
+    iptables -A FORWARD -i "$bridge" -o "$egress" -s "$subnet" -j ACCEPT
+  fi
+  if ! iptables -C FORWARD -i "$egress" -o "$bridge" -d "$subnet" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1; then
+    iptables -A FORWARD -i "$egress" -o "$bridge" -d "$subnet" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  fi
+  if ! iptables -t nat -C POSTROUTING -s "$subnet" -o "$egress" -j MASQUERADE >/dev/null 2>&1; then
+    iptables -t nat -A POSTROUTING -s "$subnet" -o "$egress" -j MASQUERADE
+  fi
+
+  if ! ss -lunH 2>/dev/null | grep -Eq "[[:space:]](${gateway//./\\.}|0\\.0\\.0\\.0|\\*):53[[:space:]]"; then
+    pidfile="$runtime_dir/lxc-dnsmasq.pid"
+    if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+      fail "agent-managed dnsmasq is running but DNS is not listening on $gateway"
+    fi
+    rm -f "$pidfile"
+    dnsmasq --conf-file=/dev/null --interface="$bridge" --bind-interfaces --listen-address="$gateway" \
+      --no-dhcp-interface="$bridge" --pid-file="$pidfile" {network_lock_fd}>&-
+  fi
+  exit 0
+fi
 
 name=""
 path=""

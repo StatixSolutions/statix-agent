@@ -1374,6 +1374,16 @@ async fn execute_job(
             );
             let cpu = cpu.unwrap_or(2);
             let memory_mb = memory_mb.unwrap_or(4096);
+            let network = jobs::execute(
+                &RunnerEnvironment::Host,
+                &execution,
+                &workspace,
+                &lxc::network_command(),
+            )
+            .await?;
+            if network.status == "failed" {
+                return Ok(network);
+            }
             if !lxc::runtime_config_path(&name).exists() {
                 let create_args = vec![
                     "-t".into(),
@@ -1459,6 +1469,16 @@ async fn execute_job(
                 timeout_seconds: 1800,
                 log_tx: Some(log_tx.clone()),
             };
+            let network = jobs::execute(
+                &RunnerEnvironment::Host,
+                &execution,
+                &workspace,
+                &lxc::network_command(),
+            )
+            .await?;
+            if network.status == "failed" {
+                return Ok(network);
+            }
             runtime_lifecycle_command(
                 &execution,
                 &workspace,
