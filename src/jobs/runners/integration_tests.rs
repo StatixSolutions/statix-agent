@@ -76,12 +76,11 @@ fn configure_state(name: &str) -> PathBuf {
     state
 }
 
-fn context(name: &str) -> ExecutionContext {
+fn context(name: &str, timeout_seconds: u64) -> ExecutionContext {
     ExecutionContext {
         job_id: format!("integration-{name}"),
         attempt_id: format!("attempt-{name}"),
-        // Provisioning Docker can exceed five minutes on cold or slow package mirrors.
-        timeout_seconds: 600,
+        timeout_seconds,
         log_tx: None,
     }
 }
@@ -99,7 +98,7 @@ async fn lxc_docker_spins_up_executes_and_cleans_up() {
             cpu: Some(1),
             memory_mb: Some(512),
         },
-        &context("lxc"),
+        &context("lxc", 600),
         &workspace,
         compose_command(),
     )
@@ -134,7 +133,8 @@ async fn microvm_spins_up_executes_and_cleans_up() {
             cpu: Some(1),
             memory_mb: Some(1024),
         },
-        &context("microvm"),
+        // MicroVM provisioning can exceed ten minutes on cold or slow package mirrors.
+        &context("microvm", 900),
         &workspace,
         compose_command(),
     )
