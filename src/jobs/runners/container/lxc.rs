@@ -710,6 +710,27 @@ pub(crate) fn network_command() -> Vec<String> {
     ]
 }
 
+pub(crate) fn runtime_guest_network_command(name: &str) -> Option<Vec<String>> {
+    let network = lxc_bridge_network()?;
+    let guest_address = guest_ipv4_address(&network, name);
+    Some(runtime_shell_command(
+        name,
+        guest_network_command(&network, guest_address),
+    ))
+}
+
+pub(crate) fn runtime_guest_dns_command(name: &str) -> Vec<String> {
+    runtime_shell_command(name, guest_resolv_conf_command(&container_dns_config()))
+}
+
+fn runtime_shell_command(name: &str, command: String) -> Vec<String> {
+    runtime_command(
+        "lxc-attach",
+        name,
+        &["--".into(), "bash".into(), "-lc".into(), command],
+    )
+}
+
 pub(crate) async fn runtime_ipv4(name: &str) -> Result<Ipv4Addr> {
     let output = lxc_command("lxc-info")
         .arg("-n")

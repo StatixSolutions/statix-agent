@@ -1443,7 +1443,27 @@ async fn execute_job(
             if ready.status == "failed" {
                 return Ok(ready);
             }
-            let setup = "command -v docker >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io); install -d /etc/docker; printf '%s\\n' '{\"storage-driver\":\"vfs\"}' > /etc/docker/daemon.json; systemctl enable --now docker; systemctl restart docker; docker info >/dev/null";
+            if let Some(command) = lxc::runtime_guest_network_command(&name) {
+                let guest_network =
+                    jobs::execute(&RunnerEnvironment::Host, &execution, &workspace, &command)
+                        .await?;
+                if guest_network.status == "failed" {
+                    return Ok(guest_network);
+                }
+            } else {
+                warn!(job_id = %job.id, runtime = %name, "could not detect lxc bridge IPv4 network; leaving guest network unchanged");
+            }
+            let guest_dns = jobs::execute(
+                &RunnerEnvironment::Host,
+                &execution,
+                &workspace,
+                &lxc::runtime_guest_dns_command(&name),
+            )
+            .await?;
+            if guest_dns.status == "failed" {
+                return Ok(guest_dns);
+            }
+            let setup = "set -e; command -v docker >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io); install -d /etc/docker; printf '%s\\n' '{\"storage-driver\":\"vfs\"}' > /etc/docker/daemon.json; systemctl enable --now docker; systemctl restart docker; docker info >/dev/null";
             jobs::execute(
                 &RunnerEnvironment::Host,
                 &execution,
