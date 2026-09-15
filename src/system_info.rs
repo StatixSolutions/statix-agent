@@ -158,24 +158,40 @@ fn load_version_metadata() -> Option<VersionMetadata> {
                     Err(_) => continue,
                 };
 
-                let parsed = match serde_json::from_str::<VersionMetadata>(&raw) {
-                    Ok(parsed) if !parsed.version.trim().is_empty() => parsed,
-                    _ => continue,
-                };
-
-                return Some(VersionMetadata {
-                    version: parsed.version.trim().to_owned(),
-                    commit: parsed.commit.map(|value| value.trim().to_owned()),
-                    built_at: parsed
-                        .built_at
-                        .map(|value| value.trim().to_owned())
-                        .filter(|value| !value.is_empty()),
-                });
+                if let Some(metadata) = parse_version_metadata(&raw) {
+                    return Some(metadata);
+                }
             }
 
             None
         })
         .clone()
+}
+
+pub fn agent_version() -> String {
+    resolve_agent_version(load_version_metadata())
+}
+
+fn resolve_agent_version(metadata: Option<VersionMetadata>) -> String {
+    metadata
+        .map(|metadata| metadata.version)
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+}
+
+fn parse_version_metadata(raw: &str) -> Option<VersionMetadata> {
+    let parsed = serde_json::from_str::<VersionMetadata>(raw).ok()?;
+    if parsed.version.trim().is_empty() {
+        return None;
+    }
+
+    Some(VersionMetadata {
+        version: parsed.version.trim().to_owned(),
+        commit: parsed.commit.map(|value| value.trim().to_owned()),
+        built_at: parsed
+            .built_at
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+    })
 }
 
 fn version_file_candidates() -> Vec<PathBuf> {
@@ -349,7 +365,24 @@ fn unix_timestamp_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_mac_address;
+    use super::{normalize_mac_address, parse_version_metadata, resolve_agent_version};
+
+    #[test]
+    fn agent_version_uses_trimmed_release_metadata() {
+        let metadata = parse_version_metadata(
+            r#"{"version":" v1.2.3 ","commit":" abc ","builtAt":" 2026-09-15 "}"#,
+        )
+        .unwrap();
+
+        assert_eq!(resolve_agent_version(Some(metadata)), "v1.2.3");
+    }
+
+    #[test]
+    fn agent_version_falls_back_for_missing_or_invalid_metadata() {
+        assert_eq!(resolve_agent_version(None), env!("CARGO_PKG_VERSION"));
+        assert!(parse_version_metadata("not json").is_none());
+        assert!(parse_version_metadata(r#"{"version":"  "}"#).is_none());
+    }
 
     #[test]
     fn normalize_mac_address_accepts_colon_separated_values() {

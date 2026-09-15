@@ -300,8 +300,10 @@ struct CompletedJobStatus {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "statix-agent")]
+#[command(name = "statix-agent", args_conflicts_with_subcommands = true)]
 struct Cli {
+    #[arg(long, exclusive = true)]
+    version: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -334,11 +336,21 @@ impl LoginArgs {
 
 #[tokio::main]
 async fn main() {
+    let cli = Cli::parse();
+    if cli.version {
+        println!("{}", format_version(&system_info::agent_version()));
+        return;
+    }
+
     init_logging();
-    if let Err(error) = dispatch().await {
+    if let Err(error) = dispatch(cli).await {
         error!(error = %format_error_chain(&error), "fatal error");
         std::process::exit(1);
     }
+}
+
+fn format_version(version: &str) -> String {
+    format!("statix-agent {version}")
 }
 
 fn init_logging() {
@@ -354,8 +366,8 @@ fn init_logging() {
         .init();
 }
 
-async fn dispatch() -> Result<()> {
-    match Cli::parse().command {
+async fn dispatch(cli: Cli) -> Result<()> {
+    match cli.command {
         None | Some(Command::Run) => run_agent().await,
         Some(Command::Login(args)) => {
             let options = args.into_options();
@@ -2377,6 +2389,20 @@ mod tests {
                 .command,
             Some(Command::Update)
         ));
+    }
+
+    #[test]
+    fn cli_parses_version_flag() {
+        let cli = Cli::try_parse_from(["statix-agent", "--version"]).unwrap();
+
+        assert!(cli.version);
+        assert!(cli.command.is_none());
+        assert_eq!(format_version("v1.2.3"), "statix-agent v1.2.3");
+    }
+
+    #[test]
+    fn cli_rejects_version_with_a_subcommand() {
+        assert!(Cli::try_parse_from(["statix-agent", "--version", "update"]).is_err());
     }
 
     #[test]
