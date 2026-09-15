@@ -35,13 +35,7 @@ jobs:
               bash -n /repo/installers/archlinux/update.sh
               bash -n /repo/migrations/0001-lxc-cache-path.sh
               bash -n /repo/installers/common/statix-agent-dependencies.sh
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install -y --no-install-recommends \
-                ca-certificates curl cloud-image-utils dnsmasq gawk iproute2 iptables \
-                lxc lxc-templates procps util-linux xz-utils pciutils qemu-system-arm \
-                qemu-system-x86 qemu-utils openssh-client uidmap wget sudo systemd
-              /repo/installers/common/statix-agent-dependencies.sh --check
+              /repo/installers/common/statix-agent-dependencies.sh --install
             '
 
   build:
