@@ -106,6 +106,7 @@ count=0
 [[ -f "$marker" ]] && count="$(cat "$marker")"
 printf '%s\n' "$((count + 1))" >"$marker"
 EOF
+    cp "$repo_root/migrations/0003-nginx-write-access.sh" "$migration_dir/0003-nginx-write-access.sh"
   else
     cat >"$migration_dir/0001-test-state.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -113,10 +114,18 @@ set -Eeuo pipefail
 exit 42
 EOF
   fi
-  chmod 0755 "$migration_dir/0001-test-state.sh"
-  tar -czf "$asset_root/statix-agent-migrations.tar.gz" -C "$migration_dir" 0001-test-state.sh
+  chmod 0755 "$migration_dir"/*.sh
+  migration_files=(0001-test-state.sh)
+  if [[ "$mode" == success ]]; then
+    migration_files+=(0003-nginx-write-access.sh)
+  fi
+  tar -czf "$asset_root/statix-agent-migrations.tar.gz" -C "$migration_dir" "${migration_files[@]}"
   sha256sum "$asset_root/statix-agent-migrations.tar.gz" >"$asset_root/statix-agent-migrations.tar.gz.sha256"
-  printf '{\n  "schemaVersion": 1,\n  "migrations": [\n    {"id":"0001-test-state"}\n  ]\n}\n' >"$asset_root/statix-agent-migrations.json"
+  if [[ "$mode" == success ]]; then
+    printf '{\n  "schemaVersion": 1,\n  "migrations": [\n    {"id":"0001-test-state"},\n    {"id":"0003-nginx-write-access"}\n  ]\n}\n' >"$asset_root/statix-agent-migrations.json"
+  else
+    printf '{\n  "schemaVersion": 1,\n  "migrations": [\n    {"id":"0001-test-state"}\n  ]\n}\n' >"$asset_root/statix-agent-migrations.json"
+  fi
   sha256sum "$asset_root/statix-agent-migrations.json" >"$asset_root/statix-agent-migrations.json.sha256"
 }
 
@@ -132,6 +141,7 @@ run_update() {
     STATIX_BINARY_PATH="$install_root/statix-agent" \
     STATIX_VERSION_FILE="$install_root/version.json" \
     STATIX_SERVICE_PATH="$install_root/statix-agent.service" \
+    STATIX_AGENT_SERVICE_DROP_IN_DIR="$install_root/statix-agent.service.d" \
     STATIX_DEPENDENCIES_PATH="$install_root/dependencies.sh" \
     STATIX_LXC_HELPER_PATH="$install_root/statix-agent-lxc" \
     STATIX_NETWORK_HELPER_PATH="$install_root/statix-agent-network" \
@@ -194,7 +204,8 @@ printf '{"schemaVersion":1,"lastMigration":"0000"}\n' >"$state_root/migrations-s
 check 'successful update' run_update
 check 'new binary installed' assert_file_contains "$install_root/statix-agent" 'new-agent'
 check 'migration ran once' assert_file_contains "$state_root/migration-runs" '1'
-check 'migration state recorded' grep -Fq '0001-test-state' "$state_root/migrations/state.json"
+check 'migration state recorded' grep -Fq '0003-nginx-write-access' "$state_root/migrations/state.json"
+check 'nginx write access drop-in installed' grep -Fxq 'ReadWritePaths=-/etc/nginx' "$install_root/statix-agent.service.d/20-nginx-write-access.conf"
 check 'dependency helper ran' test -s "$tmp_root/dependency-installed"
 check 'LXC helper installed' assert_regular_file "$install_root/statix-agent-lxc"
 check 'network helper installed' assert_regular_file "$install_root/statix-agent-network"
