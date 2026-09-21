@@ -26,11 +26,9 @@ Group=statix-agent
 NoNewPrivileges=false
 PrivateTmp=true
 PrivateDevices=false
-ProtectHome=read-only
 ProtectSystem=strict
-# The agent does not need access to these host-only trees. Keep the paths it
-# actually consumes explicitly allow-listed below.
-InaccessiblePaths=-/boot -/home -/media -/mnt -/root -/srv
+# Keep these host trees masked even if they do not exist when the service starts.
+TemporaryFileSystem=/boot:ro /home:ro /media:ro /mnt:ro /root:ro /srv:ro
 # LXC needs its runtime and rootfs mountpoints writable. The narrow privileged
 # network helper also writes the generated stream configuration below /etc/nginx.
 ReadWritePaths=/run/lxc /run/statix-agent -/usr/lib/x86_64-linux-gnu/lxc/rootfs -/usr/lib/aarch64-linux-gnu/lxc/rootfs -/etc/nginx
