@@ -31,7 +31,7 @@ debian_packages() {
 arch_packages() {
   printf '%s\n' \
     ca-certificates curl dnsmasq gawk iproute2 iptables lxc nginx nginx-mod-stream procps-ng util-linux xz pciutils sudo \
-    wget qemu-desktop openssh cloud-init
+    wget qemu-img qemu-system-aarch64 qemu-system-x86 openssh cloud-image-utils shadow
 }
 
 detect_distro() {

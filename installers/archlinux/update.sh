@@ -228,6 +228,13 @@ EOF
   rm -f "$temporary"
 }
 
+ensure_lxc_runtime_directory() {
+  # See the Arch installer: this is normally provisioned by LXC's tmpfiles
+  # configuration at boot, but must also exist before this update restarts the
+  # sandboxed service.
+  install -d -o root -g root -m 0755 /run/lxc
+}
+
 bootstrap_curl() {
   if command -v curl >/dev/null 2>&1; then
     return
@@ -258,6 +265,7 @@ main() {
   repair_lxc_helper
   repair_network_helper
   repair_sudoers
+  ensure_lxc_runtime_directory
   local arch binary_url temporary backup version_url version_tmp start_status
   arch="$(detect_arch)"
   binary_url="${STATIX_AGENT_BINARY_URL:-$DOWNLOAD_BASE_URL/statix-agent-linux-$arch}"

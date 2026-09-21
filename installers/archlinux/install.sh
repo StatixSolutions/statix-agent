@@ -101,6 +101,13 @@ install_dependency_helper() {
   "$DEPENDENCIES_PATH" --install
 }
 
+ensure_lxc_runtime_directory() {
+  # Arch's LXC package creates this through tmpfiles on boot. Create it now as
+  # well: the unit is started in this same boot and ReadWritePaths requires the
+  # path to exist while systemd constructs the service mount namespace.
+  install -d -o root -g root -m 0755 /run/lxc
+}
+
 download_file() {
   local url="$1"
   local destination="$2"
@@ -300,6 +307,7 @@ main() {
   check_platform
   install_dependencies
   install_dependency_helper
+  ensure_lxc_runtime_directory
   ensure_service_account
   install_agent_binary
   install_version_file
