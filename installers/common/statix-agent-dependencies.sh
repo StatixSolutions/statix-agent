@@ -41,7 +41,9 @@ detect_distro() {
   case "${ID:-}" in
     ubuntu) printf 'ubuntu' ;;
     debian) printf 'debian' ;;
-    arch) printf 'archlinux' ;;
+    # Omarchy is Arch-based and uses pacman, but identifies itself separately
+    # through ID=omarchy in /etc/os-release.
+    arch | omarchy) printf 'archlinux' ;;
     *) fail "unsupported Linux distribution: ${ID:-unknown}" ;;
   esac
 }

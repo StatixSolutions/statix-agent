@@ -79,8 +79,8 @@ check_platform() {
   # shellcheck disable=SC1091
   . /etc/os-release
 
-  if [[ "${ID:-}" != "arch" ]]; then
-    log "warning: this installer targets Arch Linux; detected ${PRETTY_NAME:-unknown Linux}"
+  if [[ "${ID:-}" != "arch" && "${ID:-}" != "omarchy" ]]; then
+    log "warning: this installer targets Arch Linux and Omarchy; detected ${PRETTY_NAME:-unknown Linux}"
   fi
 }
 

@@ -5,7 +5,7 @@ Project layout:
 This repo contains:
 - the Rust `statix` agent binary
 - Ubuntu installer assets under `installers/ubuntu/24.04`
-- Arch Linux installer assets under `installers/archlinux`
+- Arch Linux and Omarchy installer assets under `installers/archlinux`
 - Debian installer assets under `installers/debian`
 - the host-side systemd units and updater script
 
