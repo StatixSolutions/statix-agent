@@ -2519,7 +2519,10 @@ where
                     Ok(ServerMessage::Error { error }) => {
                         bail!("server error: {error}");
                     }
-                    Ok(ServerMessage::Job { .. }) | Err(_) => {}
+                    // The short-lived authentication probe only waits for
+                    // `ready`; a normal session handles jobs and log queries.
+                    Ok(ServerMessage::Job { .. }) | Ok(ServerMessage::LogQuery { .. }) | Err(_) => {
+                    }
                 },
                 Some(Ok(Message::Close(frame))) => {
                     let reason = frame
