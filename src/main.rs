@@ -432,6 +432,7 @@ async fn run_agent() -> Result<()> {
         "Agent identity not configured. Run `statix-agent login --api-base-url http://host:3001` with STATIX_AGENT_CONFIG pointing at the service config, or set NODE_ID/NODE_TOKEN in the environment.",
     )?;
     info!(node_id = %config.node_id, "starting agent");
+    debug!(state_dir = %agent_state_dir()?.display(), "resolved agent state directory");
     debug!(websocket_url = %redact_url(&config.agent_ws_url), api_url = %redact_url(&config.api_base_url), publish_interval_ms = config.publish_interval_ms, system_info_check_interval_ms = config.system_info_check_interval_ms, "loaded runtime configuration");
 
     if let Some(wireguard) = config
