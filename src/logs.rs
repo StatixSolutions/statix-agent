@@ -3,7 +3,7 @@
 //! opens a log view.
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -14,6 +14,50 @@ use serde::{Deserialize, Serialize};
 use crate::config::agent_state_dir;
 
 const MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+/// `tracing-subscriber` writer which preserves the systemd/stderr output and
+/// mirrors every completed formatted line into the agent-owned spool.
+pub struct AgentLogWriter {
+    stderr: io::Stderr,
+    pending: Vec<u8>,
+}
+
+pub fn agent_log_writer() -> AgentLogWriter {
+    AgentLogWriter {
+        stderr: io::stderr(),
+        pending: Vec::new(),
+    }
+}
+
+impl Write for AgentLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.stderr.write_all(bytes)?;
+        self.pending.extend_from_slice(bytes);
+        while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line = String::from_utf8_lossy(&self.pending[..newline])
+                .trim()
+                .to_owned();
+            self.pending.drain(..=newline);
+            if !line.is_empty() {
+                let level = if line.contains(" ERROR ") {
+                    "error"
+                } else if line.contains(" WARN ") {
+                    "warn"
+                } else if line.contains(" DEBUG ") {
+                    "debug"
+                } else {
+                    "info"
+                };
+                let _ = append_agent(level, &line);
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stderr.flush()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

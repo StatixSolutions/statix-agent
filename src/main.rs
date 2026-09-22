@@ -395,6 +395,7 @@ fn init_logging() {
         .with_env_filter(filter)
         .with_target(false)
         .with_ansi(false)
+        .with_writer(logs::agent_log_writer)
         .init();
     if let Err(error) = logs::append_agent("info", "statix-agent logging initialized") {
         eprintln!("failed to initialize local agent log spool: {error}");
