@@ -149,3 +149,10 @@ that include the updater service (such as the Ubuntu and Arch installers).
 
 Job stdout and stderr continue to be forwarded to the server as job logs.
 Agent diagnostics are bounded and common secret arguments are redacted.
+
+When connected to Statix, execution output is also retained by the agent in
+`$STATIX_AGENT_STATE_DIR/logs` as structured JSONL. Statix reads bounded pages
+from that spool through the authenticated agent connection; it does not archive
+new log lines in the control-plane database. Files rotate at 100 MiB and are
+kept for seven days. Runtime and deployment commands include their resource ID
+so the infrastructure view can request the relevant retained output.

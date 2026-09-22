@@ -1,6 +1,7 @@
 mod config;
 mod enrollment;
 mod jobs;
+mod logs;
 mod metrics;
 mod system_info;
 mod wireguard;
@@ -78,6 +79,16 @@ enum ClientMessage<'a> {
         stream: &'a str,
         line: &'a str,
     },
+    #[serde(rename = "log_result")]
+    LogResult {
+        #[serde(rename = "requestId")]
+        request_id: &'a str,
+        records: &'a [logs::Record],
+        #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<&'a str>,
+    },
+    #[serde(rename = "log_capabilities")]
+    LogCapabilities,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +103,19 @@ enum ServerMessage {
     Error { error: String },
     #[serde(rename = "job")]
     Job { job: AgentJob },
+    #[serde(rename = "log_query")]
+    LogQuery {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(rename = "resourceId", default)]
+        resource_id: Option<String>,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,6 +312,12 @@ enum OutboundMessage {
         message: Option<String>,
     },
     JobLog(jobs::JobLogLine),
+    LogResult {
+        request_id: String,
+        records: Vec<logs::Record>,
+        next_cursor: Option<String>,
+    },
+    LogCapabilities,
     Metrics(metrics::MetricsPayload),
     SystemInfo(system_info::SystemInfoPayload),
 }
@@ -364,6 +394,9 @@ fn init_logging() {
         .with_target(false)
         .with_ansi(false)
         .init();
+    if let Err(error) = logs::append_agent("info", "statix-agent logging initialized") {
+        eprintln!("failed to initialize local agent log spool: {error}");
+    }
 }
 
 async fn dispatch(cli: Cli) -> Result<()> {
@@ -523,16 +556,37 @@ async fn run_session(
                     .await
                 }
                 OutboundMessage::JobLog(log) => {
+                    if let Err(error) = logs::append_job(
+                        &log.job_id,
+                        &log.attempt_id,
+                        log.stream.as_str(),
+                        &log.line,
+                        &log.scope,
+                        log.resource_id.as_deref(),
+                    ) {
+                        warn!(error = %error, "failed to retain agent job log locally");
+                    }
+                    // New agents retain canonical output locally.  The server
+                    // keeps accepting job_log from older agents for migration.
+                    Ok(())
+                }
+                OutboundMessage::LogResult {
+                    request_id,
+                    records,
+                    next_cursor,
+                } => {
                     send_client_message(
                         &mut ws_write,
-                        &ClientMessage::JobLog {
-                            job_id: &log.job_id,
-                            attempt_id: &log.attempt_id,
-                            stream: log.stream.as_str(),
-                            line: &log.line,
+                        &ClientMessage::LogResult {
+                            request_id: &request_id,
+                            records: &records,
+                            next_cursor: next_cursor.as_deref(),
                         },
                     )
                     .await
+                }
+                OutboundMessage::LogCapabilities => {
+                    send_client_message(&mut ws_write, &ClientMessage::LogCapabilities).await
                 }
                 OutboundMessage::Metrics(payload) => {
                     send_client_message(
@@ -596,6 +650,8 @@ async fn run_session(
                                 attempt_id: job.id.clone(),
                                 stream: jobs::JobLogStream::Stderr,
                                 line: message.clone(),
+                                scope: "job".to_string(),
+                                resource_id: None,
                             });
                             CompletedJobStatus {
                                 job_id: job.id.clone(),
@@ -626,11 +682,18 @@ async fn run_session(
                         }
                         Ok(ServerMessage::Ready { node_id }) => {
                             debug!(node_id = %node_id, "server ready");
+                            let _ = outbound_tx.send(OutboundMessage::LogCapabilities);
                         }
                         Ok(ServerMessage::Job { job }) => {
                             debug!(job_id = %job.id, "received job");
                             let _issued_at = job.issued_at;
                             queued_jobs.push_back(job);
+                        }
+                        Ok(ServerMessage::LogQuery { request_id, scope, resource_id, cursor, limit }) => {
+                            match logs::query(scope.as_deref(), resource_id.as_deref(), cursor.as_deref(), limit.unwrap_or(200)) {
+                                Ok((records, next_cursor)) => { let _ = outbound_tx.send(OutboundMessage::LogResult { request_id, records, next_cursor }); }
+                                Err(error) => warn!(error = %error, "failed to query local agent logs"),
+                            }
                         }
                         Err(_) => {
                             debug!(payload = %truncate_for_log(&text, 200), "ignored non-server-message websocket payload");
@@ -889,6 +952,8 @@ async fn execute_job(
                     attempt_id: execution.attempt_id.unwrap_or_else(|| job.id.clone()),
                     timeout_seconds: timeout_seconds.unwrap_or(1800),
                     log_tx: Some(log_tx),
+                    log_scope: "job".to_string(),
+                    log_resource_id: None,
                 },
                 &workspace,
                 &cargo_test_command(args),
@@ -970,6 +1035,8 @@ async fn execute_job(
                         attempt_id: attempt_id.clone(),
                         timeout_seconds,
                         log_tx: Some(log_tx.clone()),
+                        log_scope: "deployment".to_string(),
+                        log_resource_id: Some(deployment_id.clone()),
                     },
                     &workspace,
                     &setup_command,
@@ -1003,6 +1070,8 @@ async fn execute_job(
                     attempt_id,
                     timeout_seconds,
                     log_tx: Some(log_tx),
+                    log_scope: "deployment".to_string(),
+                    log_resource_id: Some(deployment_id.clone()),
                 },
                 &workspace,
                 &project_systemd_command(
@@ -1033,6 +1102,8 @@ async fn execute_job(
                 attempt_id: job.id.clone(),
                 timeout_seconds: 1800,
                 log_tx: Some(log_tx),
+                log_scope: "runtime".to_string(),
+                log_resource_id: Some(runtime_id.clone()),
             };
             let runtime_name = runtime_name(project_id, runtime_id);
             info!(job_id = %job.id, project_id = %project_id, runtime_id = %runtime_id, revision, runtime = %runtime_name, networks = networks.len(), services = services.len(), "starting docker reconciliation");
@@ -1370,6 +1441,8 @@ async fn execute_job(
                 attempt_id: job.id.clone(),
                 timeout_seconds: 3600,
                 log_tx: Some(log_tx.clone()),
+                log_scope: "runtime".to_string(),
+                log_resource_id: Some(runtime_id.clone()),
             };
             let name = runtime_name(project_id, runtime_id);
             let image = image.as_deref().unwrap_or("ubuntu:24.04");
@@ -1500,6 +1573,8 @@ async fn execute_job(
                 attempt_id: job.id.clone(),
                 timeout_seconds: 1800,
                 log_tx: Some(log_tx.clone()),
+                log_scope: "runtime".to_string(),
+                log_resource_id: Some(runtime_id.clone()),
             };
             let network = jobs::execute(
                 &RunnerEnvironment::Host,
@@ -1532,6 +1607,8 @@ async fn execute_job(
                 attempt_id: job.id.clone(),
                 timeout_seconds: 1800,
                 log_tx: Some(log_tx.clone()),
+                log_scope: "runtime".to_string(),
+                log_resource_id: Some(runtime_id.clone()),
             };
             runtime_lifecycle_command(
                 &execution,
@@ -1554,6 +1631,8 @@ async fn execute_job(
                 attempt_id: job.id.clone(),
                 timeout_seconds: 1800,
                 log_tx: Some(log_tx.clone()),
+                log_scope: "runtime".to_string(),
+                log_resource_id: Some(runtime_id.clone()),
             };
             runtime_lifecycle_command(
                 &execution,
