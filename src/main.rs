@@ -53,6 +53,8 @@ enum ClientMessage<'a> {
         node_id: &'a str,
         #[serde(rename = "nodeToken")]
         node_token: &'a str,
+        #[serde(rename = "logQuery")]
+        log_query: bool,
     },
     #[serde(rename = "metrics")]
     Metrics {
@@ -502,6 +504,7 @@ async fn run_session(
         &ClientMessage::Auth {
             node_id: &config.node_id,
             node_token: &config.node_token,
+            log_query: true,
         },
     )
     .await
