@@ -72,15 +72,6 @@ enum ClientMessage<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<&'a str>,
     },
-    #[serde(rename = "job_log")]
-    JobLog {
-        #[serde(rename = "jobId")]
-        job_id: &'a str,
-        #[serde(rename = "attemptId")]
-        attempt_id: &'a str,
-        stream: &'a str,
-        line: &'a str,
-    },
     #[serde(rename = "log_result")]
     LogResult {
         #[serde(rename = "requestId")]
@@ -313,7 +304,6 @@ enum OutboundMessage {
         status: &'static str,
         message: Option<String>,
     },
-    JobLog(jobs::JobLogLine),
     LogResult {
         request_id: String,
         records: Vec<logs::Record>,
@@ -453,10 +443,15 @@ async fn run_agent() -> Result<()> {
     let (stop_tx, stop_rx) = watch::channel(false);
     tokio::spawn(shutdown_signal_task(stop_tx));
 
+    // Log retention belongs to the process, not to an individual WebSocket
+    // session. Jobs may continue running while the agent reconnects.
+    let (job_log_tx, job_log_rx) = mpsc::unbounded_channel::<jobs::JobLogLine>();
+    let _job_log_retention_task = tokio::spawn(retain_job_logs(job_log_rx));
+
     let mut stop_rx_main = stop_rx.clone();
 
     while !*stop_rx_main.borrow() {
-        match run_session(&config, stop_rx_main.clone()).await {
+        match run_session(&config, stop_rx_main.clone(), job_log_tx.clone()).await {
             Ok(SessionOutcome::Stopped) => break,
             Err(error) => {
                 warn!(error = %error, "websocket session failed; reconnecting");
@@ -484,6 +479,7 @@ async fn run_agent() -> Result<()> {
 async fn run_session(
     config: &AgentConfig,
     mut stop_rx: watch::Receiver<bool>,
+    job_log_tx: mpsc::UnboundedSender<jobs::JobLogLine>,
 ) -> Result<SessionOutcome> {
     let connect = tokio::time::timeout(
         Duration::from_millis(config.connect_timeout_ms),
@@ -541,7 +537,6 @@ async fn run_session(
     let (mut ws_write, mut ws_read) = ws.split();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<OutboundMessage>();
     let (job_done_tx, mut job_done_rx) = mpsc::unbounded_channel::<CompletedJobStatus>();
-    let (job_log_tx, mut job_log_rx) = mpsc::unbounded_channel::<jobs::JobLogLine>();
     tokio::spawn(async move {
         while let Some(message) = outbound_rx.recv().await {
             let send_result = match message {
@@ -559,21 +554,6 @@ async fn run_session(
                         },
                     )
                     .await
-                }
-                OutboundMessage::JobLog(log) => {
-                    if let Err(error) = logs::append_job(
-                        &log.job_id,
-                        &log.attempt_id,
-                        log.stream.as_str(),
-                        &log.line,
-                        &log.scope,
-                        log.resource_id.as_deref(),
-                    ) {
-                        warn!(error = %error, "failed to retain agent job log locally");
-                    }
-                    // New agents retain canonical output locally.  The server
-                    // keeps accepting job_log from older agents for migration.
-                    Ok(())
                 }
                 OutboundMessage::LogResult {
                     request_id,
@@ -695,10 +675,28 @@ async fn run_session(
                             queued_jobs.push_back(job);
                         }
                         Ok(ServerMessage::LogQuery { request_id, scope, resource_id, cursor, limit }) => {
-                            match logs::query(scope.as_deref(), resource_id.as_deref(), cursor.as_deref(), limit.unwrap_or(200)) {
-                                Ok((records, next_cursor)) => { let _ = outbound_tx.send(OutboundMessage::LogResult { request_id, records, next_cursor }); }
-                                Err(error) => warn!(error = %error, "failed to query local agent logs"),
-                            }
+                            let outbound_tx = outbound_tx.clone();
+                            tokio::spawn(async move {
+                                let query = tokio::task::spawn_blocking(move || {
+                                    logs::query(
+                                        scope.as_deref(),
+                                        resource_id.as_deref(),
+                                        cursor.as_deref(),
+                                        limit.unwrap_or(200),
+                                    )
+                                }).await;
+                                match query {
+                                    Ok(Ok((records, next_cursor))) => {
+                                        let _ = outbound_tx.send(OutboundMessage::LogResult {
+                                            request_id,
+                                            records,
+                                            next_cursor,
+                                        });
+                                    }
+                                    Ok(Err(error)) => warn!(error = %error, "failed to query local agent logs"),
+                                    Err(error) => warn!(error = %error, "local agent log query task failed"),
+                                }
+                            });
                         }
                         Err(_) => {
                             debug!(payload = %truncate_for_log(&text, 200), "ignored non-server-message websocket payload");
@@ -763,17 +761,33 @@ async fn run_session(
                 }
                 debug!(job_id = %job_id, status = %status, "job status update queued for websocket delivery");
             }
-            log = job_log_rx.recv() => {
-                let Some(log) = log else {
-                    return Err(anyhow!("job log channel closed"));
-                };
-                let _ = outbound_tx.send(OutboundMessage::JobLog(log));
-            }
             changed = stop_rx.changed() => {
                 if changed.is_ok() && *stop_rx.borrow() {
                     return Ok(SessionOutcome::Stopped);
                 }
             }
+        }
+    }
+}
+
+async fn retain_job_logs(mut job_log_rx: mpsc::UnboundedReceiver<jobs::JobLogLine>) {
+    while let Some(log) = job_log_rx.recv().await {
+        let result = tokio::task::spawn_blocking(move || {
+            logs::append_job(
+                &log.job_id,
+                &log.attempt_id,
+                log.stream.as_str(),
+                &log.line,
+                &log.scope,
+                log.resource_id.as_deref(),
+            )
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!(error = %error, "failed to retain agent job log locally"),
+            Err(error) => warn!(error = %error, "agent job log retention task failed"),
         }
     }
 }
