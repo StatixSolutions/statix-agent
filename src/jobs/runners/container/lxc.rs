@@ -862,24 +862,26 @@ mod tests {
     use super::runtime_command;
 
     #[test]
-    fn runtime_command_uses_privileged_helper_and_explicit_storage() {
+    fn runtime_command_preserves_state_dir_uses_privileged_helper_and_explicit_storage() {
         let command = runtime_command(
             "lxc-attach",
             "statix-project-runtime",
             &["--".into(), "true".into()],
         );
 
-        assert_eq!(command[0], "sudo");
-        assert_eq!(command[3], "/usr/local/libexec/statix-agent-lxc");
-        assert_eq!(command[4], "lxc-attach");
+        assert_eq!(command[0], "env");
+        assert!(command[1].starts_with("STATIX_AGENT_STATE_DIR="));
+        assert_eq!(command[2], "sudo");
+        assert_eq!(command[5], "/usr/local/libexec/statix-agent-lxc");
+        assert_eq!(command[6], "lxc-attach");
         assert!(
             command
                 .windows(2)
                 .any(|pair| pair == ["-n", "statix-project-runtime"])
         );
-        assert_eq!(command[7], "-P");
-        assert!(command[8] == "/var/lib/lxc" || command[8].ends_with("/lxc/containers"));
-        assert_eq!(&command[9..], ["--", "true"]);
+        assert_eq!(command[9], "-P");
+        assert!(command[10] == "/var/lib/lxc" || command[10].ends_with("/lxc/containers"));
+        assert_eq!(&command[11..], ["--", "true"]);
     }
 
     #[test]
