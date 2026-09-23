@@ -82,6 +82,8 @@ fn context(name: &str, timeout_seconds: u64) -> ExecutionContext {
         attempt_id: format!("attempt-{name}"),
         timeout_seconds,
         log_tx: None,
+        log_scope: "job".to_string(),
+        log_resource_id: None,
     }
 }
 

@@ -14,9 +14,12 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use crate::jobs::{
+use crate::{
+    config::agent_state_dir,
+    jobs::{
     CommandSpec, ExecutionContext, JobExecutionResult, JobLogStream, PreparedWorkspace,
     summarize_command_output,
+    },
 };
 
 use super::{
@@ -634,6 +637,9 @@ fn lxc_command(program: &str) -> TokioCommand {
         .arg("--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY")
         .arg(lxc_helper_path())
         .arg(program);
+    if let Ok(state_dir) = agent_state_dir() {
+        command.env("STATIX_AGENT_STATE_DIR", state_dir);
+    }
     if let Some(home) = lxc_process_home() {
         command.env("HOME", &home);
         command.env("XDG_CACHE_HOME", home.join(".cache"));
@@ -651,6 +657,9 @@ fn lxc_std_command(program: &str) -> StdCommand {
         .arg("--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY")
         .arg(lxc_helper_path())
         .arg(program);
+    if let Ok(state_dir) = agent_state_dir() {
+        command.env("STATIX_AGENT_STATE_DIR", state_dir);
+    }
     if let Some(home) = lxc_process_home() {
         command.env("HOME", &home);
         command.env("XDG_CACHE_HOME", home.join(".cache"));
@@ -667,6 +676,7 @@ fn lxc_helper_path() -> &'static str {
 fn lxc_process_home() -> Option<PathBuf> {
     env_path("STATIX_AGENT_STATE_DIR")
         .or_else(|| env_path("STATE_DIRECTORY"))
+        .or_else(|| agent_state_dir().ok())
         .map(|path| path.join("lxc"))
 }
 
@@ -685,7 +695,10 @@ pub(crate) fn runtime_log_path(name: &str) -> PathBuf {
 }
 
 pub(crate) fn runtime_command(program: &str, name: &str, args: &[String]) -> Vec<String> {
+    let state_dir = agent_state_dir().unwrap_or_else(|_| PathBuf::from("/var/lib/statix-agent"));
     let mut command = vec![
+        "env".to_string(),
+        format!("STATIX_AGENT_STATE_DIR={}", state_dir.display()),
         "sudo".to_string(),
         "-n".to_string(),
         "--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY".to_string(),
@@ -849,24 +862,26 @@ mod tests {
     use super::runtime_command;
 
     #[test]
-    fn runtime_command_uses_privileged_helper_and_explicit_storage() {
+    fn runtime_command_preserves_state_dir_uses_privileged_helper_and_explicit_storage() {
         let command = runtime_command(
             "lxc-attach",
             "statix-project-runtime",
             &["--".into(), "true".into()],
         );
 
-        assert_eq!(command[0], "sudo");
-        assert_eq!(command[3], "/usr/local/libexec/statix-agent-lxc");
-        assert_eq!(command[4], "lxc-attach");
+        assert_eq!(command[0], "env");
+        assert!(command[1].starts_with("STATIX_AGENT_STATE_DIR="));
+        assert_eq!(command[2], "sudo");
+        assert_eq!(command[5], "/usr/local/libexec/statix-agent-lxc");
+        assert_eq!(command[6], "lxc-attach");
         assert!(
             command
                 .windows(2)
                 .any(|pair| pair == ["-n", "statix-project-runtime"])
         );
-        assert_eq!(command[7], "-P");
-        assert!(command[8] == "/var/lib/lxc" || command[8].ends_with("/lxc/containers"));
-        assert_eq!(&command[9..], ["--", "true"]);
+        assert_eq!(command[9], "-P");
+        assert!(command[10] == "/var/lib/lxc" || command[10].ends_with("/lxc/containers"));
+        assert_eq!(&command[11..], ["--", "true"]);
     }
 
     #[test]

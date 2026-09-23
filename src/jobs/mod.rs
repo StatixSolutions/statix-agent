@@ -104,6 +104,8 @@ pub struct ExecutionContext {
     pub attempt_id: String,
     pub timeout_seconds: u64,
     pub log_tx: Option<mpsc::UnboundedSender<JobLogLine>>,
+    pub log_scope: String,
+    pub log_resource_id: Option<String>,
 }
 
 impl ExecutionContext {
@@ -117,6 +119,8 @@ impl ExecutionContext {
             attempt_id: self.attempt_id.clone(),
             stream,
             line: line.into(),
+            scope: self.log_scope.clone(),
+            resource_id: self.log_resource_id.clone(),
         });
     }
 }
@@ -127,6 +131,8 @@ pub struct JobLogLine {
     pub attempt_id: String,
     pub stream: JobLogStream,
     pub line: String,
+    pub scope: String,
+    pub resource_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
