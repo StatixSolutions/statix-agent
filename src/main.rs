@@ -33,9 +33,16 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Run,
+    Run(RunArgs),
     Login(LoginArgs),
     Update,
+}
+
+#[derive(Debug, Args, Default)]
+struct RunArgs {
+    /// Log every job the control plane sends without spinning up containers or VMs.
+    #[arg(long)]
+    debug_log_only: bool,
 }
 
 #[derive(Debug, Args)]
@@ -95,7 +102,8 @@ fn init_logging() {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        None | Some(Command::Run) => run_agent().await,
+        None => run_agent(RunArgs::default()).await,
+        Some(Command::Run(args)) => run_agent(args).await,
         Some(Command::Login(args)) => {
             let options = args.into_options();
             let login_config = resolve_login_config(options.api_base_url.clone());
@@ -118,11 +126,11 @@ pub(crate) fn format_error_chain(error: &anyhow::Error) -> String {
     parts.join(": ")
 }
 
-async fn run_agent() -> Result<()> {
+async fn run_agent(args: RunArgs) -> Result<()> {
     let config = AgentConfig::load()?.context(
         "Agent identity not configured. Run `statix-agent login --api-base-url http://host:3001` with STATIX_AGENT_CONFIG pointing at the service config, or set NODE_ID/NODE_TOKEN in the environment.",
     )?;
-    info!(node_id = %config.node_id, "starting agent");
+    info!(node_id = %config.node_id, debug_log_only = args.debug_log_only, "starting agent");
     debug!(state_dir = %agent_state_dir()?.display(), "resolved agent state directory");
     debug!(websocket_url = %redact_url(&config.agent_ws_url), api_url = %redact_url(&config.api_base_url), publish_interval_ms = config.publish_interval_ms, system_info_check_interval_ms = config.system_info_check_interval_ms, "loaded runtime configuration");
 
@@ -144,7 +152,7 @@ async fn run_agent() -> Result<()> {
     let (stop_tx, stop_rx) = watch::channel(false);
     tokio::spawn(shutdown_signal_task(stop_tx));
 
-    transport::session::run(&config, stop_rx).await?;
+    transport::session::run(&config, stop_rx, args.debug_log_only).await?;
 
     info!("agent stopped");
     Ok(())
@@ -408,6 +416,30 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::Update)
+        ));
+    }
+
+    #[test]
+    fn cli_parses_run_debug_log_only_flag() {
+        let cli = Cli::try_parse_from(["statix-agent", "run", "--debug-log-only"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run(RunArgs {
+                debug_log_only: true
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_run_without_flag_defaults_debug_log_only_to_false() {
+        let cli = Cli::try_parse_from(["statix-agent", "run"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run(RunArgs {
+                debug_log_only: false
+            }))
         ));
     }
 

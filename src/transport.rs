@@ -8,5 +8,6 @@
 //! terminates connections.
 
 pub mod dispatch;
+pub mod intent;
 pub mod protocol;
 pub mod session;

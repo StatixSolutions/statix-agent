@@ -43,9 +43,13 @@ pub enum OutboundMessage {
 }
 
 /// Runs the reconnect loop until `stop_rx` signals shutdown.
-pub async fn run(config: &AgentConfig, mut stop_rx: watch::Receiver<bool>) -> Result<()> {
+pub async fn run(
+    config: &AgentConfig,
+    mut stop_rx: watch::Receiver<bool>,
+    debug_log_only: bool,
+) -> Result<()> {
     while !*stop_rx.borrow() {
-        match run_once(config, stop_rx.clone()).await {
+        match run_once(config, stop_rx.clone(), debug_log_only).await {
             Ok(SessionOutcome::Stopped) => break,
             Err(error) => {
                 warn!(error = %error, "websocket session failed; reconnecting");
@@ -72,6 +76,7 @@ pub async fn run(config: &AgentConfig, mut stop_rx: watch::Receiver<bool>) -> Re
 async fn run_once(
     config: &AgentConfig,
     mut stop_rx: watch::Receiver<bool>,
+    debug_log_only: bool,
 ) -> Result<SessionOutcome> {
     let connect = tokio::time::timeout(
         Duration::from_millis(config.connect_timeout_ms),
@@ -193,7 +198,7 @@ async fn run_once(
             incoming = ws_read.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
                     match serde_json::from_str::<ServerMessage>(&text) {
-                        Ok(message) => match dispatch::handle(message, &outbound_tx) {
+                        Ok(message) => match dispatch::handle(message, &outbound_tx, debug_log_only) {
                             HandleOutcome::Continue => {}
                             HandleOutcome::Fatal(error) => return Err(error),
                         },

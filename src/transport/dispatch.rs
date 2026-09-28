@@ -12,6 +12,7 @@ use anyhow::anyhow;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use super::intent::{self, JobIntent};
 use super::protocol::{AgentJob, ServerMessage};
 use super::session::OutboundMessage;
 use crate::logs;
@@ -26,6 +27,7 @@ pub enum HandleOutcome {
 pub fn handle(
     message: ServerMessage,
     outbound_tx: &mpsc::UnboundedSender<OutboundMessage>,
+    debug_log_only: bool,
 ) -> HandleOutcome {
     match message {
         ServerMessage::Ready { node_id } => {
@@ -35,7 +37,7 @@ pub fn handle(
         }
         ServerMessage::Error { error } => HandleOutcome::Fatal(anyhow!("server error: {error}")),
         ServerMessage::Job { job } => {
-            handle_job(job, outbound_tx);
+            handle_job(job, outbound_tx, debug_log_only);
             HandleOutcome::Continue
         }
         ServerMessage::LogQuery {
@@ -58,23 +60,41 @@ pub fn handle(
     }
 }
 
-fn handle_job(job: AgentJob, outbound_tx: &mpsc::UnboundedSender<OutboundMessage>) {
-    let kind = job
-        .spec
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
+/// Logs exactly what this job would do, then replies without ever executing
+/// it. Job execution is disconnected regardless of `debug_log_only` today
+/// (see plans/controlplane-agent-communicationsystem.md); the flag only
+/// changes the reply's wording, so the interface is ready for whenever a
+/// real execution path is reconnected: `if debug_log_only { describe-only }
+/// else { execute }`.
+fn handle_job(
+    job: AgentJob,
+    outbound_tx: &mpsc::UnboundedSender<OutboundMessage>,
+    debug_log_only: bool,
+) {
+    let JobIntent {
+        kind,
+        summary,
+        fields,
+    } = intent::describe(&job.spec);
     info!(
         job_id = %job.id,
         issued_at = job.issued_at,
-        kind,
-        spec = %job.spec,
+        kind = %kind,
+        summary = %summary,
+        fields = ?fields,
+        debug_log_only,
         "received job (not executed)"
     );
+
+    let message = if debug_log_only {
+        format!("debug-log-only: logged intended action for '{kind}', not executed")
+    } else {
+        NOT_IMPLEMENTED_MESSAGE.to_string()
+    };
     let _ = outbound_tx.send(OutboundMessage::JobStatus {
         job_id: job.id,
         status: "failed",
-        message: Some(NOT_IMPLEMENTED_MESSAGE.to_string()),
+        message: Some(message),
     });
 }
 
@@ -134,7 +154,11 @@ mod tests {
     fn job_is_logged_and_rejected_not_executed() {
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let outcome = handle(job(serde_json::json!({"kind": "deploy_docker"})), &tx);
+        let outcome = handle(
+            job(serde_json::json!({"kind": "deploy_docker"})),
+            &tx,
+            false,
+        );
 
         assert!(matches!(outcome, HandleOutcome::Continue));
         match rx.try_recv().unwrap() {
@@ -152,6 +176,26 @@ mod tests {
     }
 
     #[test]
+    fn job_is_logged_and_rejected_with_debug_log_only_wording() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let outcome = handle(job(serde_json::json!({"kind": "deploy_docker"})), &tx, true);
+
+        assert!(matches!(outcome, HandleOutcome::Continue));
+        match rx.try_recv().unwrap() {
+            OutboundMessage::JobStatus {
+                status, message, ..
+            } => {
+                assert_eq!(status, "failed");
+                let message = message.unwrap();
+                assert!(message.starts_with("debug-log-only:"));
+                assert!(message.contains("deploy_docker"));
+            }
+            other => panic!("expected a JobStatus reply, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ready_requests_log_capabilities() {
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -160,6 +204,7 @@ mod tests {
                 node_id: "n1".to_string(),
             },
             &tx,
+            false,
         );
 
         assert!(matches!(outcome, HandleOutcome::Continue));
@@ -178,6 +223,7 @@ mod tests {
                 error: "boom".to_string(),
             },
             &tx,
+            false,
         );
 
         assert!(matches!(outcome, HandleOutcome::Fatal(_)));
