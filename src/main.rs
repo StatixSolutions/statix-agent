@@ -43,6 +43,20 @@ struct RunArgs {
     /// Log every job the control plane sends without spinning up containers or VMs.
     #[arg(long)]
     debug_log_only: bool,
+    /// Wire protocol to speak to the control plane. v2 is opt-in: production
+    /// routing still sends `/ws/agent` to the v1-only API, not
+    /// node-controller, so defaulting to v2 would break real connections.
+    #[arg(long, value_enum, default_value_t = Protocol::V1)]
+    protocol: Protocol,
+}
+
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+enum Protocol {
+    #[default]
+    #[value(name = "v1")]
+    V1,
+    #[value(name = "v2")]
+    V2,
 }
 
 #[derive(Debug, Args)]
@@ -130,7 +144,7 @@ async fn run_agent(args: RunArgs) -> Result<()> {
     let config = AgentConfig::load()?.context(
         "Agent identity not configured. Run `statix-agent login --api-base-url http://host:3001` with STATIX_AGENT_CONFIG pointing at the service config, or set NODE_ID/NODE_TOKEN in the environment.",
     )?;
-    info!(node_id = %config.node_id, debug_log_only = args.debug_log_only, "starting agent");
+    info!(node_id = %config.node_id, debug_log_only = args.debug_log_only, protocol = ?args.protocol, "starting agent");
     debug!(state_dir = %agent_state_dir()?.display(), "resolved agent state directory");
     debug!(websocket_url = %redact_url(&config.agent_ws_url), api_url = %redact_url(&config.api_base_url), publish_interval_ms = config.publish_interval_ms, system_info_check_interval_ms = config.system_info_check_interval_ms, "loaded runtime configuration");
 
@@ -152,7 +166,10 @@ async fn run_agent(args: RunArgs) -> Result<()> {
     let (stop_tx, stop_rx) = watch::channel(false);
     tokio::spawn(shutdown_signal_task(stop_tx));
 
-    transport::session::run(&config, stop_rx, args.debug_log_only).await?;
+    match args.protocol {
+        Protocol::V1 => transport::session::run(&config, stop_rx, args.debug_log_only).await?,
+        Protocol::V2 => transport::v2::session::run(&config, stop_rx).await?,
+    }
 
     info!("agent stopped");
     Ok(())
@@ -426,7 +443,8 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Run(RunArgs {
-                debug_log_only: true
+                debug_log_only: true,
+                ..
             }))
         ));
     }
@@ -438,7 +456,34 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Run(RunArgs {
-                debug_log_only: false
+                debug_log_only: false,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_run_defaults_protocol_to_v1() {
+        let cli = Cli::try_parse_from(["statix-agent", "run"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run(RunArgs {
+                protocol: Protocol::V1,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_parses_run_protocol_v2_flag() {
+        let cli = Cli::try_parse_from(["statix-agent", "run", "--protocol", "v2"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run(RunArgs {
+                protocol: Protocol::V2,
+                ..
             }))
         ));
     }
