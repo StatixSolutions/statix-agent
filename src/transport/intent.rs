@@ -8,6 +8,8 @@
 //! and a full typed model (with every optional execution field the old
 //! runner needed) would just be dead weight now that nothing executes.
 
+use std::fmt;
+
 use serde_json::Value;
 
 pub struct JobIntent {
@@ -16,6 +18,19 @@ pub struct JobIntent {
     pub summary: String,
     /// Extra structured key/value pairs worth attaching to the log event.
     pub fields: Vec<(&'static str, String)>,
+}
+
+/// Renders as an indented multi-line block (kind, then each field, then the
+/// summary sentence last) rather than a single crammed line — this is what
+/// makes `transport::dispatch`'s "received job" log actually readable.
+impl fmt::Display for JobIntent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "  kind: {}", self.kind)?;
+        for (key, value) in &self.fields {
+            writeln!(f, "  {key}: {value}")?;
+        }
+        write!(f, "  summary: {}", self.summary)
+    }
 }
 
 pub fn describe(spec: &Value) -> JobIntent {
@@ -235,6 +250,25 @@ fn describe_unknown(kind: &str, spec: &Value) -> JobIntent {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn displays_as_an_indented_multi_line_block() {
+        let intent = describe(&json!({
+            "kind": "create_runtime",
+            "projectId": "p1",
+            "runtimeId": "r1",
+        }));
+
+        let rendered = intent.to_string();
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        assert_eq!(lines[0], "  kind: create_runtime");
+        assert!(lines[1..].iter().all(|line| line.starts_with("  ")));
+        assert_eq!(
+            lines.last().unwrap(),
+            &"  summary: create runtime r1 (project p1) image=ubuntu:24.04 cpu=default memory_mb=default"
+        );
+    }
 
     #[test]
     fn describes_deploy_docker_services_and_exposure() {

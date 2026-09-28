@@ -12,7 +12,7 @@ use anyhow::anyhow;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::intent::{self, JobIntent};
+use super::intent;
 use super::protocol::{AgentJob, ServerMessage};
 use super::session::OutboundMessage;
 use crate::logs;
@@ -71,23 +71,19 @@ fn handle_job(
     outbound_tx: &mpsc::UnboundedSender<OutboundMessage>,
     debug_log_only: bool,
 ) {
-    let JobIntent {
-        kind,
-        summary,
-        fields,
-    } = intent::describe(&job.spec);
+    let intent = intent::describe(&job.spec);
     info!(
         job_id = %job.id,
         issued_at = job.issued_at,
-        kind = %kind,
-        summary = %summary,
-        fields = ?fields,
         debug_log_only,
-        "received job (not executed)"
+        "received job, not executed:\n{intent}"
     );
 
     let message = if debug_log_only {
-        format!("debug-log-only: logged intended action for '{kind}', not executed")
+        format!(
+            "debug-log-only: logged intended action for '{}', not executed",
+            intent.kind
+        )
     } else {
         NOT_IMPLEMENTED_MESSAGE.to_string()
     };
