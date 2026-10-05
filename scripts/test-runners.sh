@@ -24,4 +24,4 @@ if [ "$ready" != true ]; then
     echo 'Test infrastructure failure: systemd did not start' >&2
     exit 1
 fi
-docker exec "$container" bash /opt/statix/run-runner-tests-service.sh
+docker exec --env STATIX_RUNNER_TEST_FILTER="${STATIX_RUNNER_TEST_FILTER:-}" "$container" bash /opt/statix/run-runner-tests-service.sh

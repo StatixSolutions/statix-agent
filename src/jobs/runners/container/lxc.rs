@@ -34,7 +34,7 @@ use super::{
     shell::{shell_escape, shell_join, truncate_for_log},
 };
 
-pub(super) struct LxcContainer {
+pub(crate) struct LxcContainer {
     name: String,
     destroyed: bool,
 }
@@ -77,7 +77,7 @@ impl LxcContainer {
         Ok(())
     }
 
-    pub(super) async fn create(
+    pub(crate) async fn create(
         name: String,
         distribution: &str,
         release: &str,
@@ -143,7 +143,7 @@ impl LxcContainer {
         Ok(container)
     }
 
-    pub(super) async fn start(&mut self) -> Result<()> {
+    pub(crate) async fn start(&mut self) -> Result<()> {
         let log_path = self.log_path();
         let status = lxc_command("lxc-start")
             .arg("-n")
@@ -192,7 +192,7 @@ impl LxcContainer {
         Ok(())
     }
 
-    pub(super) async fn copy_archive_to_guest(&self, archive_path: &Path) -> Result<()> {
+    pub(crate) async fn copy_archive_to_guest(&self, archive_path: &Path) -> Result<()> {
         let archive = fs::read(archive_path).with_context(|| {
             format!(
                 "failed to read workspace archive {}",
@@ -245,7 +245,7 @@ impl LxcContainer {
         Ok(())
     }
 
-    pub(super) async fn configure_guest_dns(&self, timeout_seconds: u64) -> Result<()> {
+    pub(crate) async fn configure_guest_dns(&self, timeout_seconds: u64) -> Result<()> {
         let dns_config = container_dns_config();
         if dns_config.nameservers.is_empty() && !dns_config.include_default_gateway {
             warn!(container = %self.name, "no non-loopback DNS resolvers found for guest");
@@ -265,7 +265,7 @@ impl LxcContainer {
         Ok(())
     }
 
-    pub(super) async fn configure_guest_network(&self, timeout_seconds: u64) -> Result<()> {
+    pub(crate) async fn configure_guest_network(&self, timeout_seconds: u64) -> Result<()> {
         let Some(network) = lxc_bridge_network() else {
             warn!(container = %self.name, "could not detect lxc bridge IPv4 network; leaving guest network unchanged");
             return Ok(());
@@ -285,7 +285,7 @@ impl LxcContainer {
         Ok(())
     }
 
-    pub(super) async fn prepare_guest(
+    pub(crate) async fn prepare_guest(
         &self,
         ctx: &ExecutionContext,
         timeout_seconds: u64,
@@ -332,7 +332,7 @@ impl LxcContainer {
         Ok(None)
     }
 
-    pub(super) async fn run_command(
+    pub(crate) async fn run_command(
         &self,
         ctx: &ExecutionContext,
         timeout_seconds: u64,
@@ -390,7 +390,7 @@ impl LxcContainer {
         }
     }
 
-    async fn attach_output(
+    pub(crate) async fn attach_output(
         &self,
         timeout_seconds: u64,
         shell_command: &str,
@@ -481,7 +481,45 @@ impl LxcContainer {
         })
     }
 
-    pub(super) async fn destroy(&mut self) {
+    /// Stops the container but keeps its rootfs so it can be started again.
+    pub(crate) async fn stop(&mut self) -> Result<()> {
+        let status = lxc_command("lxc-stop")
+            .arg("-n")
+            .arg(&self.name)
+            .arg("-P")
+            .arg(lxc_storage_path())
+            .arg("--kill")
+            .status()
+            .await
+            .with_context(|| missing_dependency_message("lxc-stop", "lxc"))?;
+        if !status.success() {
+            bail!("lxc-stop failed for container {} with {status}", self.name);
+        }
+        Ok(())
+    }
+
+    /// Returns the lxc state name (e.g. `RUNNING`, `STOPPED`) from `lxc-info -sH`.
+    pub(crate) async fn state(&self) -> Result<String> {
+        let output = lxc_command("lxc-info")
+            .arg("-n")
+            .arg(&self.name)
+            .arg("-P")
+            .arg(lxc_storage_path())
+            .arg("-sH")
+            .output()
+            .await
+            .with_context(|| missing_dependency_message("lxc-info", "lxc"))?;
+        if !output.status.success() {
+            bail!(
+                "lxc-info failed for container {}: {}",
+                self.name,
+                summarize_raw_command_output(&output.stdout, &output.stderr)
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    pub(crate) async fn destroy(&mut self) {
         if self.destroyed {
             return;
         }
@@ -530,6 +568,20 @@ impl LxcContainer {
         writeln!(config, "\n# Statix fallback when lxcbr0 is unavailable")?;
         writeln!(config, "lxc.net.0.type = empty")?;
         Ok(())
+    }
+}
+
+/// Synchronous best-effort teardown by name, for test guards that must clean
+/// up from `Drop` even when an assertion failed mid-test.
+#[cfg(test)]
+pub(crate) fn force_destroy(name: &str) {
+    for (program, extra) in [("lxc-stop", Some("--kill")), ("lxc-destroy", None)] {
+        let mut command = lxc_std_command(program);
+        command.arg("-n").arg(name).arg("-P").arg(lxc_storage_path());
+        if let Some(extra) = extra {
+            command.arg(extra);
+        }
+        let _ = command.output();
     }
 }
 

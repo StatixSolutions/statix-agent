@@ -3,9 +3,9 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result, bail};
 use tokio::process::Command as TokioCommand;
 
-pub(super) const WORKSPACE_ARCHIVE: &str = "statix-workspace.tar.gz";
+pub(crate) const WORKSPACE_ARCHIVE: &str = "statix-workspace.tar.gz";
 
-pub(super) async fn create_workspace_archive(archive_path: &Path, workdir: &Path) -> Result<()> {
+pub(crate) async fn create_workspace_archive(archive_path: &Path, workdir: &Path) -> Result<()> {
     if archive_path.exists() {
         let _ = fs::remove_file(archive_path);
     }
