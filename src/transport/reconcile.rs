@@ -3,8 +3,8 @@
 //! and side-effect free — no docker/lxc calls.
 //!
 //! Real execution (and therefore real observation of what's actually
-//! running) is still disconnected, exactly as it is for the v1 job path
-//! (see `transport::dispatch`). So every object here is reported honestly as
+//! running) is still disconnected: job execution is not wired up
+//! yet. So every object here is reported honestly as
 //! `Pending` with an `Unsupported` condition, rather than claiming anything
 //! ran — the protocol-correct way to say "I understood this spec, I'm just
 //! not acting on it yet" (see `Reason::Unsupported` in
@@ -132,7 +132,7 @@ fn describe_workload(workload: &WorkloadSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::v2::protocol::{
+    use crate::transport::protocol::{
         NetworkSpec, ObjectMeta, PowerState, Resources, RestartPolicy, RolloutSpec,
         RolloutStrategy, RuntimeSpecBody, RuntimeType, ServiceSpec, WorkloadSpecBody,
     };

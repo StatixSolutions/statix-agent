@@ -1,13 +1,15 @@
-//! Connects to the control plane, authenticates, and reconnects with a
-//! jittered-by-config delay when the socket drops. Owns outbound framing
-//! (turning an [`OutboundMessage`] into a `ClientMessage` on the wire) and
-//! the periodic metrics/system_info publish ticks. Incoming frames are
-//! handed to [`super::dispatch::handle`].
+//! Protocol v2 session: connect, then `hello` -> await `challenge` -> `auth`
+//! -> await `welcome` (plans/controlplane-agent-communicationsystem.md §3.3),
+//! then the steady-state loop — reply to `ping`, honor `goaway`, hand
+//! `desired` to `dispatch`, and fire a resync tick every `resyncSec` that
+//! re-reports status even with nothing new. That resync tick is the
+//! "verify current against target" cycle.
 
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use sha2::{Digest, Sha256};
 use tokio::{
     select,
     sync::{mpsc, watch},
@@ -17,42 +19,45 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
 use super::dispatch::{self, HandleOutcome};
-use super::protocol::{ClientMessage, ServerMessage};
+use super::protocol::{self, AuthBody, HelloBody, IncomingMessage, NodeDesiredState};
 use crate::config::{AgentConfig, WireGuardConfig};
-use crate::{logs, metrics, system_info};
+use crate::{metrics, system_info};
 
 pub enum SessionOutcome {
     Stopped,
+    /// The connection ended normally (error, close, or server `goaway`); the
+    /// outer loop should reconnect, optionally after a server-requested
+    /// delay instead of the usual jittered `reconnect_delay_ms`.
+    Reconnect {
+        after: Option<Duration>,
+    },
 }
 
 #[derive(Debug)]
 pub enum OutboundMessage {
-    JobStatus {
-        job_id: String,
-        status: &'static str,
-        message: Option<String>,
-    },
-    LogResult {
-        request_id: String,
-        records: Vec<logs::Record>,
-        next_cursor: Option<String>,
-    },
+    Pong,
+    Status(protocol::ObjectStatus),
+    Event(protocol::NodeEvent),
+    Metrics(Box<metrics::MetricsPayload>),
+    SystemInfo(Box<system_info::SystemInfoPayload>),
+    LogResult(protocol::LogResultBody),
     LogCapabilities,
-    Metrics(metrics::MetricsPayload),
-    SystemInfo(system_info::SystemInfoPayload),
 }
 
 /// Runs the reconnect loop until `stop_rx` signals shutdown.
-pub async fn run(
-    config: &AgentConfig,
-    mut stop_rx: watch::Receiver<bool>,
-    debug_log_only: bool,
-) -> Result<()> {
+pub async fn run(config: &AgentConfig, mut stop_rx: watch::Receiver<bool>) -> Result<()> {
+    let boot_id = protocol::new_id();
+
     while !*stop_rx.borrow() {
-        match run_once(config, stop_rx.clone(), debug_log_only).await {
+        let mut retry_after = None;
+        match run_once(config, stop_rx.clone(), &boot_id).await {
             Ok(SessionOutcome::Stopped) => break,
+            Ok(SessionOutcome::Reconnect { after }) => {
+                info!("v2 session ended; reconnecting");
+                retry_after = after;
+            }
             Err(error) => {
-                warn!(error = %error, "websocket session failed; reconnecting");
+                warn!(error = %error, "v2 session failed; reconnecting");
             }
         }
 
@@ -60,8 +65,9 @@ pub async fn run(
             break;
         }
 
+        let delay = retry_after.unwrap_or(Duration::from_millis(config.reconnect_delay_ms));
         select! {
-            _ = tokio::time::sleep(Duration::from_millis(config.reconnect_delay_ms)) => {}
+            _ = tokio::time::sleep(delay) => {}
             changed = stop_rx.changed() => {
                 if changed.is_ok() && *stop_rx.borrow() {
                     break;
@@ -76,7 +82,7 @@ pub async fn run(
 async fn run_once(
     config: &AgentConfig,
     mut stop_rx: watch::Receiver<bool>,
-    debug_log_only: bool,
+    boot_id: &str,
 ) -> Result<SessionOutcome> {
     let connect = tokio::time::timeout(
         Duration::from_millis(config.connect_timeout_ms),
@@ -92,31 +98,106 @@ async fn run_once(
     .context("failed to connect websocket")?;
     let (mut ws, _) = connect;
 
-    info!(websocket_url = %crate::redact_url(&config.agent_ws_url), "connected to server");
+    info!(websocket_url = %crate::redact_url(&config.agent_ws_url), "connected to server (protocol v2)");
 
-    send_client_message(
+    send(
         &mut ws,
-        &ClientMessage::Auth {
-            node_id: &config.node_id,
-            node_token: &config.node_token,
-            log_query: true,
+        "hello",
+        HelloBody {
+            protocol: vec![2],
+            agent_version: crate::system_info::agent_version(),
+            boot_id: boot_id.to_string(),
+            capabilities: Vec::new(), // honest: no execution capability yet
+            observed: Default::default(), // no local desired-state store yet
+            pending_op_results: Vec::new(),
         },
     )
     .await
-    .context("failed to send websocket auth")?;
+    .context("failed to send hello")?;
 
-    await_ready(&mut ws, config.connect_timeout_ms, &config.node_id).await?;
+    let challenge = await_message(
+        &mut ws,
+        config.connect_timeout_ms,
+        |message| match message {
+            IncomingMessage::Challenge(body) => Some(body),
+            _ => None,
+        },
+    )
+    .await
+    .context("failed to receive challenge")?;
+    debug!(nonce_len = challenge.nonce.len(), "received challenge");
+
+    let signature = hex::encode(Sha256::digest(config.node_token.as_bytes()));
+    send(
+        &mut ws,
+        "auth",
+        AuthBody {
+            node_id: config.node_id.clone(),
+            signature,
+        },
+    )
+    .await
+    .context("failed to send auth")?;
+
+    let welcome = await_message(
+        &mut ws,
+        config.connect_timeout_ms,
+        |message| match message {
+            IncomingMessage::Welcome(body) => Some(body),
+            _ => None,
+        },
+    )
+    .await
+    .context("failed to receive welcome")?;
+
+    if welcome.upgrade_required.unwrap_or(false) {
+        return Err(anyhow!(
+            "server requires an agent upgrade before v2 can proceed"
+        ));
+    }
+    info!(
+        session_id = %welcome.session_id,
+        heartbeat_sec = welcome.heartbeat_sec,
+        resync_sec = welcome.resync_sec,
+        "v2 session established"
+    );
+
+    let (mut ws_write, mut ws_read) = ws.split();
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<OutboundMessage>();
+    tokio::spawn(async move {
+        while let Some(message) = outbound_rx.recv().await {
+            let payload = match message {
+                OutboundMessage::Pong => protocol::encode("pong", serde_json::json!({})),
+                OutboundMessage::Status(status) => protocol::encode("status", status),
+                OutboundMessage::Event(event) => protocol::encode("event", event),
+                OutboundMessage::Metrics(payload) => protocol::encode("metrics", payload),
+                OutboundMessage::SystemInfo(payload) => protocol::encode("system_info", payload),
+                OutboundMessage::LogResult(body) => protocol::encode("logs.result", body),
+                OutboundMessage::LogCapabilities => {
+                    protocol::encode("logs.capabilities", serde_json::json!({}))
+                }
+            };
+            if ws_write.send(Message::Text(payload.into())).await.is_err() {
+                warn!("outbound v2 message send failed");
+                break;
+            }
+        }
+    });
+
+    let mut last_desired: Option<NodeDesiredState> = None;
+    let mut resync_tick = interval(Duration::from_secs(u64::from(welcome.resync_sec)));
+    resync_tick.tick().await; // first tick fires immediately; consume it
+
+    let _ = outbound_tx.send(OutboundMessage::LogCapabilities);
 
     let mut last_system_info_hash: Option<String> = None;
     let mut last_system_info_published_at: Option<Instant> = None;
-
-    if let Err(error) = send_initial_metrics(&mut ws).await {
-        warn!(error = %error, "initial metrics publish failed");
-    }
-
-    if let Err(error) = send_initial_system_info(
-        &mut ws,
+    publish_metrics_once(&outbound_tx);
+    if let Err(error) = publish_system_info_if_needed(
+        &outbound_tx,
+        true,
         config.wireguard.as_ref(),
+        config.system_info_republish_interval_ms,
         &mut last_system_info_hash,
         &mut last_system_info_published_at,
     )
@@ -132,82 +213,26 @@ async fn run_once(
     publish_tick.tick().await;
     system_tick.tick().await;
 
-    let (mut ws_write, mut ws_read) = ws.split();
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<OutboundMessage>();
-    tokio::spawn(async move {
-        while let Some(message) = outbound_rx.recv().await {
-            let send_result = match message {
-                OutboundMessage::JobStatus {
-                    job_id,
-                    status,
-                    message,
-                } => {
-                    send_client_message(
-                        &mut ws_write,
-                        &ClientMessage::JobStatus {
-                            job_id: &job_id,
-                            status,
-                            message: message.as_deref(),
-                        },
-                    )
-                    .await
-                }
-                OutboundMessage::LogResult {
-                    request_id,
-                    records,
-                    next_cursor,
-                } => {
-                    send_client_message(
-                        &mut ws_write,
-                        &ClientMessage::LogResult {
-                            request_id: &request_id,
-                            records: &records,
-                            next_cursor: next_cursor.as_deref(),
-                        },
-                    )
-                    .await
-                }
-                OutboundMessage::LogCapabilities => {
-                    send_client_message(&mut ws_write, &ClientMessage::LogCapabilities).await
-                }
-                OutboundMessage::Metrics(payload) => {
-                    send_client_message(
-                        &mut ws_write,
-                        &ClientMessage::Metrics { payload: &payload },
-                    )
-                    .await
-                }
-                OutboundMessage::SystemInfo(payload) => {
-                    send_client_message(
-                        &mut ws_write,
-                        &ClientMessage::SystemInfo { payload: &payload },
-                    )
-                    .await
-                }
-            };
-
-            if let Err(error) = send_result {
-                warn!(error = %error, "outbound message send failed");
-                break;
-            }
-        }
-    });
-
     loop {
         select! {
             incoming = ws_read.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
-                    match serde_json::from_str::<ServerMessage>(&text) {
-                        Ok(message) => match dispatch::handle(message, &outbound_tx, debug_log_only) {
+                    match protocol::decode(&text) {
+                        Ok(message) => match dispatch::handle(message, &outbound_tx, &mut last_desired) {
                             HandleOutcome::Continue => {}
-                            HandleOutcome::Fatal(error) => return Err(error),
+                            HandleOutcome::Reconnect { after } => {
+                                return Ok(SessionOutcome::Reconnect { after });
+                            }
                         },
-                        Err(_) => {
-                            debug!(payload = %truncate_for_log(&text, 200), "ignored non-server-message websocket payload");
+                        Err(error) => {
+                            debug!(?error, "ignored malformed v2 frame");
                         }
                     }
                 }
                 Some(Ok(Message::Close(frame))) => {
+                    if *stop_rx.borrow() {
+                        return Ok(SessionOutcome::Stopped);
+                    }
                     let reason = frame
                         .map(|value| value.reason.to_string())
                         .unwrap_or_else(|| "websocket closed".to_owned());
@@ -227,11 +252,7 @@ async fn run_once(
                     return Err(anyhow!("websocket connection ended"));
                 }
             },
-            _ = publish_tick.tick() => {
-                if let Err(error) = publish_metrics_once(&outbound_tx).await {
-                    warn!(error = %error, "metrics publish failed");
-                }
-            }
+            _ = publish_tick.tick() => publish_metrics_once(&outbound_tx),
             _ = system_tick.tick() => {
                 if let Err(error) = publish_system_info_if_needed(
                     &outbound_tx,
@@ -244,6 +265,11 @@ async fn run_once(
                     warn!(error = %error, "system info publish failed");
                 }
             }
+            _ = resync_tick.tick() => {
+                if let Some(desired) = &last_desired {
+                    dispatch::resync(desired, &outbound_tx);
+                }
+            }
             changed = stop_rx.changed() => {
                 if changed.is_ok() && *stop_rx.borrow() {
                     return Ok(SessionOutcome::Stopped);
@@ -253,86 +279,18 @@ async fn run_once(
     }
 }
 
-async fn await_ready<S>(ws: &mut S, timeout_ms: u64, node_id: &str) -> Result<()>
-where
-    S: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
-{
-    let ready = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
-        loop {
-            match ws.next().await {
-                Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text)
-                {
-                    Ok(ServerMessage::Ready {
-                        node_id: ready_node_id,
-                    }) if ready_node_id == node_id => {
-                        return Ok(());
-                    }
-                    Ok(ServerMessage::Ready {
-                        node_id: ready_node_id,
-                    }) => {
-                        anyhow::bail!(
-                            "websocket authenticated for unexpected node: {ready_node_id}"
-                        );
-                    }
-                    Ok(ServerMessage::Error { error }) => {
-                        anyhow::bail!("server error: {error}");
-                    }
-                    // The short-lived authentication probe only waits for
-                    // `ready`; a normal session handles jobs and log queries.
-                    Ok(ServerMessage::Job { .. }) | Ok(ServerMessage::LogQuery { .. }) | Err(_) => {
-                    }
-                },
-                Some(Ok(Message::Close(frame))) => {
-                    let reason = frame
-                        .map(|value| value.reason.to_string())
-                        .unwrap_or_else(|| "websocket closed during auth".to_owned());
-                    anyhow::bail!(reason);
-                }
-                Some(Ok(_)) => {}
-                Some(Err(error)) => return Err(anyhow!(error)).context("websocket auth failed"),
-                None => anyhow::bail!("websocket closed before ready"),
-            }
+fn publish_metrics_once(outbound_tx: &mpsc::UnboundedSender<OutboundMessage>) {
+    match metrics::collect_metrics() {
+        Ok(payload) => {
+            let _ = outbound_tx.send(OutboundMessage::Metrics(Box::new(payload)));
+            debug!("metrics payload queued");
         }
-    })
-    .await
-    .map_err(|_| anyhow!("websocket auth timed out after {} ms", timeout_ms))?;
-
-    ready
+        Err(error) => warn!(error = %error, "metrics collection failed"),
+    }
 }
 
-async fn send_client_message<S>(ws: &mut S, message: &ClientMessage<'_>) -> Result<()>
-where
-    S: Sink<Message> + Unpin,
-    S::Error: std::error::Error + Send + Sync + 'static,
-{
-    let payload = serde_json::to_string(message)?;
-    ws.send(Message::Text(payload.into())).await?;
-    Ok(())
-}
-
-async fn publish_metrics_once(outbound_tx: &mpsc::UnboundedSender<OutboundMessage>) -> Result<()> {
-    let payload = metrics::collect_metrics()?;
-    outbound_tx
-        .send(OutboundMessage::Metrics(payload))
-        .map_err(|_| anyhow!("metrics channel closed"))
-        .context("failed to queue metrics payload")?;
-    debug!("metrics payload queued");
-    Ok(())
-}
-
-async fn send_initial_metrics<S>(ws: &mut S) -> Result<()>
-where
-    S: Sink<Message> + Unpin,
-    S::Error: std::error::Error + Send + Sync + 'static,
-{
-    let payload = metrics::collect_metrics()?;
-    send_client_message(ws, &ClientMessage::Metrics { payload: &payload })
-        .await
-        .context("failed to publish metrics payload")?;
-    debug!("initial metrics payload published");
-    Ok(())
-}
-
+/// Queues a `system_info` frame when forced, when the payload hash changed,
+/// or when `republish_interval_ms` has elapsed since the last one.
 async fn publish_system_info_if_needed(
     outbound_tx: &mpsc::UnboundedSender<OutboundMessage>,
     force: bool,
@@ -350,9 +308,8 @@ async fn publish_system_info_if_needed(
     if force || changed || freshness_due {
         let hash = payload.hash.clone();
         outbound_tx
-            .send(OutboundMessage::SystemInfo(payload))
-            .map_err(|_| anyhow!("system info channel closed"))
-            .context("failed to queue system info payload")?;
+            .send(OutboundMessage::SystemInfo(Box::new(payload)))
+            .map_err(|_| anyhow!("system info channel closed"))?;
         *last_hash = Some(hash);
         *last_published_at = Some(Instant::now());
         debug!(changed, freshness_due, "system info payload queued");
@@ -361,32 +318,56 @@ async fn publish_system_info_if_needed(
     Ok(())
 }
 
-async fn send_initial_system_info<S>(
-    ws: &mut S,
-    wireguard: Option<&WireGuardConfig>,
-    last_hash: &mut Option<String>,
-    last_published_at: &mut Option<Instant>,
-) -> Result<()>
+async fn send<T, S>(ws: &mut S, kind: &'static str, body: T) -> Result<()>
 where
+    T: serde::Serialize,
     S: Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
-    let payload = system_info::collect_system_info(wireguard).await?;
-    send_client_message(ws, &ClientMessage::SystemInfo { payload: &payload })
-        .await
-        .context("failed to publish system info payload")?;
-    *last_hash = Some(payload.hash.clone());
-    *last_published_at = Some(Instant::now());
-    debug!("initial system info payload published");
+    let payload = protocol::encode(kind, body);
+    ws.send(Message::Text(payload.into())).await?;
     Ok(())
 }
 
-fn truncate_for_log(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-
-    let mut shortened = value.chars().take(max_chars).collect::<String>();
-    shortened.push_str("...");
-    shortened
+/// Waits for the next incoming frame that `extract` recognizes, ignoring
+/// (and logging) anything else — the handshake-phase counterpart of the main loop's
+/// `await_ready`, tolerant of stray frames while waiting for one specific
+/// handshake step.
+async fn await_message<S, T>(
+    ws: &mut S,
+    timeout_ms: u64,
+    mut extract: impl FnMut(IncomingMessage) -> Option<T>,
+) -> Result<T>
+where
+    S: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => match protocol::decode(&text) {
+                    Ok(message) => {
+                        if let Some(value) = extract(message) {
+                            return Ok(value);
+                        }
+                    }
+                    Err(error) => {
+                        debug!(?error, "ignored malformed v2 frame during handshake");
+                    }
+                },
+                Some(Ok(Message::Close(frame))) => {
+                    let reason = frame
+                        .map(|value| value.reason.to_string())
+                        .unwrap_or_else(|| "websocket closed during handshake".to_owned());
+                    return Err(anyhow!(reason));
+                }
+                Some(Ok(_)) => {}
+                Some(Err(error)) => {
+                    return Err(anyhow!(error)).context("websocket handshake failed");
+                }
+                None => return Err(anyhow!("websocket closed before handshake completed")),
+            }
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("v2 handshake timed out after {} ms", timeout_ms))?
 }

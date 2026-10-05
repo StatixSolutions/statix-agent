@@ -1,107 +1,96 @@
-//! Turns one incoming [`ServerMessage`] into a log line and, for message
-//! kinds that expect a reply, the outbound reply to send.
-//!
-//! The agent no longer executes jobs itself — see
-//! `plans/controlplane-agent-communicationsystem.md`. A `Job` is logged and
-//! explicitly rejected via `job_status`, rather than silently dropped or left
-//! to hang forever in whatever state the server last saw it in (the design
-//! doc's §3.3 principle: reply `rejected`/explicit-failure to anything the
-//! agent won't act on, never drop it silently).
+//! Handles one decoded v2 message. `desired` triggers `reconcile::plan` and
+//! queues the resulting status(es) + event; `ping` replies `pong`; `goaway`
+//! tells the session to reconnect after the server's requested delay;
+//! `logs.query` is answered from the local log spool;
+//! anything else (`op_dispatch`/`op_cancel`) is logged and dropped —
+//! mirroring node-controller's own gateway, whose `handleV2` default case
+//! does the same for frames *from* the agent it doesn't handle yet.
 
-use anyhow::anyhow;
+use std::time::Duration;
+
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use super::intent;
-use super::protocol::{AgentJob, ServerMessage};
-use super::session::OutboundMessage;
 use crate::logs;
 
-const NOT_IMPLEMENTED_MESSAGE: &str = "not implemented: agent job execution is being rebuilt, see plans/controlplane-agent-communicationsystem.md";
+use super::protocol::{IncomingMessage, LogQueryBody, LogResultBody, NodeDesiredState};
+use super::reconcile::{self, ReconcilePlan};
+use super::session::OutboundMessage;
 
 pub enum HandleOutcome {
     Continue,
-    Fatal(anyhow::Error),
+    Reconnect { after: Option<Duration> },
 }
 
 pub fn handle(
-    message: ServerMessage,
+    message: IncomingMessage,
     outbound_tx: &mpsc::UnboundedSender<OutboundMessage>,
-    debug_log_only: bool,
+    last_desired: &mut Option<NodeDesiredState>,
 ) -> HandleOutcome {
     match message {
-        ServerMessage::Ready { node_id } => {
-            debug!(node_id = %node_id, "server ready");
-            let _ = outbound_tx.send(OutboundMessage::LogCapabilities);
+        IncomingMessage::Ping => {
+            let _ = outbound_tx.send(OutboundMessage::Pong);
             HandleOutcome::Continue
         }
-        ServerMessage::Error { error } => HandleOutcome::Fatal(anyhow!("server error: {error}")),
-        ServerMessage::Job { job } => {
-            handle_job(job, outbound_tx, debug_log_only);
-            HandleOutcome::Continue
-        }
-        ServerMessage::LogQuery {
-            request_id,
-            scope,
-            resource_id,
-            cursor,
-            limit,
-        } => {
-            spawn_log_query(
-                request_id,
-                scope,
-                resource_id,
-                cursor,
-                limit,
-                outbound_tx.clone(),
+        IncomingMessage::Goaway(body) => {
+            info!(
+                retry_after_ms = body.retry_after_ms,
+                "server requested goaway"
             );
+            HandleOutcome::Reconnect {
+                after: Some(Duration::from_millis(body.retry_after_ms)),
+            }
+        }
+        IncomingMessage::Desired(state) => {
+            apply_desired(state, outbound_tx, last_desired);
+            HandleOutcome::Continue
+        }
+        IncomingMessage::LogQuery(query) => {
+            spawn_log_query(query, outbound_tx.clone());
+            HandleOutcome::Continue
+        }
+        IncomingMessage::Unhandled(kind) => {
+            info!(kind = %kind, "received v2 message not handled this phase");
+            HandleOutcome::Continue
+        }
+        // Challenge/welcome only ever arrive during the handshake, which
+        // session.rs consumes directly before this loop starts; seeing one
+        // here would mean the server re-sent a handshake frame mid-session,
+        // which nothing does today.
+        IncomingMessage::Challenge(_) | IncomingMessage::Welcome(_) => {
+            warn!("received unexpected handshake message outside the handshake");
             HandleOutcome::Continue
         }
     }
 }
 
-/// Logs exactly what this job would do, then replies without ever executing
-/// it. Job execution is disconnected regardless of `debug_log_only` today
-/// (see plans/controlplane-agent-communicationsystem.md); the flag only
-/// changes the reply's wording, so the interface is ready for whenever a
-/// real execution path is reconnected: `if debug_log_only { describe-only }
-/// else { execute }`.
-fn handle_job(
-    job: AgentJob,
+fn apply_desired(
+    state: NodeDesiredState,
     outbound_tx: &mpsc::UnboundedSender<OutboundMessage>,
-    debug_log_only: bool,
+    last_desired: &mut Option<NodeDesiredState>,
 ) {
-    let intent = intent::describe(&job.spec);
-    info!(
-        job_id = %job.id,
-        issued_at = job.issued_at,
-        debug_log_only,
-        "received job, not executed:\n{intent}"
-    );
-
-    let message = if debug_log_only {
-        format!(
-            "debug-log-only: logged intended action for '{}', not executed",
-            intent.kind
-        )
-    } else {
-        NOT_IMPLEMENTED_MESSAGE.to_string()
-    };
-    let _ = outbound_tx.send(OutboundMessage::JobStatus {
-        job_id: job.id,
-        status: "failed",
-        message: Some(message),
-    });
+    let ReconcilePlan {
+        statuses,
+        event,
+        block,
+    } = reconcile::plan(&state);
+    let generation = state.generation;
+    info!(generation, "received desired state:\n{block}");
+    for status in statuses {
+        let _ = outbound_tx.send(OutboundMessage::Status(status));
+    }
+    let _ = outbound_tx.send(OutboundMessage::Event(event));
+    *last_desired = Some(state);
 }
 
-fn spawn_log_query(
-    request_id: String,
-    scope: Option<String>,
-    resource_id: Option<String>,
-    cursor: Option<String>,
-    limit: Option<usize>,
-    outbound_tx: mpsc::UnboundedSender<OutboundMessage>,
-) {
+fn spawn_log_query(query: LogQueryBody, outbound_tx: mpsc::UnboundedSender<OutboundMessage>) {
+    let LogQueryBody {
+        request_id,
+        scope,
+        resource_id,
+        cursor,
+        limit,
+    } = query;
     info!(
         request_id = %request_id,
         scope = scope.as_deref().unwrap_or("-"),
@@ -109,7 +98,7 @@ fn spawn_log_query(
         "received log query"
     );
     tokio::spawn(async move {
-        let query = tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             logs::query(
                 scope.as_deref(),
                 resource_id.as_deref(),
@@ -118,13 +107,13 @@ fn spawn_log_query(
             )
         })
         .await;
-        match query {
+        match result {
             Ok(Ok((records, next_cursor))) => {
-                let _ = outbound_tx.send(OutboundMessage::LogResult {
+                let _ = outbound_tx.send(OutboundMessage::LogResult(LogResultBody {
                     request_id,
                     records,
                     next_cursor,
-                });
+                }));
             }
             Ok(Err(error)) => warn!(error = %error, "failed to query local agent logs"),
             Err(error) => warn!(error = %error, "local agent log query task failed"),
@@ -132,96 +121,113 @@ fn spawn_log_query(
     });
 }
 
+/// Re-reports status for the last known desired state without waiting for a
+/// new one — the periodic half of the "verify current against target" cycle
+/// (`welcome.resyncSec`, per plans/controlplane-agent-communicationsystem.md
+/// §3.3: "agent -> status ... full snapshot every resyncSec").
+pub fn resync(state: &NodeDesiredState, outbound_tx: &mpsc::UnboundedSender<OutboundMessage>) {
+    let ReconcilePlan {
+        statuses, block, ..
+    } = reconcile::plan(state);
+    let generation = state.generation;
+    info!(generation, "resync: re-reporting status:\n{block}");
+    for status in statuses {
+        let _ = outbound_tx.send(OutboundMessage::Status(status));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::protocol::GoawayBody;
 
-    fn job(spec: serde_json::Value) -> ServerMessage {
-        ServerMessage::Job {
-            job: AgentJob {
-                id: "j1".to_string(),
-                issued_at: 1,
-                spec,
-            },
+    fn empty_state() -> NodeDesiredState {
+        NodeDesiredState {
+            node_id: "n1".to_string(),
+            generation: 1,
+            runtimes: Vec::new(),
+            workloads: Vec::new(),
         }
     }
 
     #[test]
-    fn job_is_logged_and_rejected_not_executed() {
+    fn ping_replies_pong() {
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut last_desired = None;
 
-        let outcome = handle(
-            job(serde_json::json!({"kind": "deploy_docker"})),
-            &tx,
-            false,
-        );
+        let outcome = handle(IncomingMessage::Ping, &tx, &mut last_desired);
 
         assert!(matches!(outcome, HandleOutcome::Continue));
-        match rx.try_recv().unwrap() {
-            OutboundMessage::JobStatus {
-                job_id,
-                status,
-                message,
-            } => {
-                assert_eq!(job_id, "j1");
-                assert_eq!(status, "failed");
-                assert_eq!(message.as_deref(), Some(NOT_IMPLEMENTED_MESSAGE));
-            }
-            other => panic!("expected a JobStatus reply, got {other:?}"),
-        }
+        assert!(matches!(rx.try_recv().unwrap(), OutboundMessage::Pong));
     }
 
     #[test]
-    fn job_is_logged_and_rejected_with_debug_log_only_wording() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-
-        let outcome = handle(job(serde_json::json!({"kind": "deploy_docker"})), &tx, true);
-
-        assert!(matches!(outcome, HandleOutcome::Continue));
-        match rx.try_recv().unwrap() {
-            OutboundMessage::JobStatus {
-                status, message, ..
-            } => {
-                assert_eq!(status, "failed");
-                let message = message.unwrap();
-                assert!(message.starts_with("debug-log-only:"));
-                assert!(message.contains("deploy_docker"));
-            }
-            other => panic!("expected a JobStatus reply, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn ready_requests_log_capabilities() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-
-        let outcome = handle(
-            ServerMessage::Ready {
-                node_id: "n1".to_string(),
-            },
-            &tx,
-            false,
-        );
-
-        assert!(matches!(outcome, HandleOutcome::Continue));
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            OutboundMessage::LogCapabilities
-        ));
-    }
-
-    #[test]
-    fn server_error_is_fatal() {
+    fn goaway_requests_reconnect_after_server_delay() {
         let (tx, _rx) = mpsc::unbounded_channel();
+        let mut last_desired = None;
 
         let outcome = handle(
-            ServerMessage::Error {
-                error: "boom".to_string(),
-            },
+            IncomingMessage::Goaway(GoawayBody {
+                retry_after_ms: 2500,
+            }),
             &tx,
-            false,
+            &mut last_desired,
         );
 
-        assert!(matches!(outcome, HandleOutcome::Fatal(_)));
+        match outcome {
+            HandleOutcome::Reconnect { after: Some(delay) } => {
+                assert_eq!(delay, Duration::from_millis(2500));
+            }
+            _ => panic!("expected a Reconnect outcome with a delay"),
+        }
+    }
+
+    #[test]
+    fn desired_state_updates_last_desired_and_queues_status_and_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut last_desired = None;
+
+        let outcome = handle(
+            IncomingMessage::Desired(empty_state()),
+            &tx,
+            &mut last_desired,
+        );
+
+        assert!(matches!(outcome, HandleOutcome::Continue));
+        assert!(last_desired.is_some());
+        assert!(matches!(rx.try_recv().unwrap(), OutboundMessage::Event(_)));
+        assert!(rx.try_recv().is_err()); // no statuses for an empty desired state
+    }
+
+    #[tokio::test]
+    async fn log_query_replies_with_a_log_result() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut last_desired = None;
+        let query = crate::transport::protocol::decode(
+            r#"{"v":2,"type":"logs.query","id":"01J","ts":1,"body":{"requestId":"r1","limit":1}}"#,
+        )
+        .unwrap();
+
+        let outcome = handle(query, &tx, &mut last_desired);
+
+        assert!(matches!(outcome, HandleOutcome::Continue));
+        // The query runs on a spawned blocking task; an error querying the
+        // local spool is logged and sends nothing, so only assert on the
+        // reply when one arrives.
+        if let Ok(Some(OutboundMessage::LogResult(body))) =
+            tokio::time::timeout(Duration::from_secs(2), rx.recv()).await
+        {
+            assert_eq!(body.request_id, "r1");
+        }
+    }
+
+    #[test]
+    fn resync_resends_status_without_a_new_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let state = empty_state();
+
+        resync(&state, &tx);
+
+        assert!(rx.try_recv().is_err()); // empty state -> no statuses, and no event on resync
     }
 }

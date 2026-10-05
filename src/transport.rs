@@ -1,15 +1,14 @@
-//! The agent's WebSocket transport: v1 wire types (`protocol`), the
-//! connect/auth/reconnect session loop (`session`), and turning an incoming
-//! message into a log line plus whatever reply it needs (`dispatch`). `v2`
-//! is the real protocol v2 client (opt-in via `--protocol v2` — see
-//! `src/main.rs`), speaking the contract `apps/node-controller` now
-//! implements.
+//! The agent's WebSocket transport (protocol v2): the envelope and resource
+//! model (`protocol`), the connect/handshake/reconcile session loop
+//! (`session`), per-message handling (`dispatch`), and the pure "verify
+//! current against target" step (`reconcile`).
 //!
-//! See `plans/controlplane-agent-communicationsystem.md` §9 for the target
-//! module layout this is a slice of.
+//! See `plans/controlplane-agent-communicationsystem.md` §3 for the wire
+//! protocol this implements, and
+//! `apps/node-controller/node_modules/@statix/node-controller-contract` for
+//! the canonical schema it's ported from.
 
 pub mod dispatch;
-pub mod intent;
 pub mod protocol;
+pub mod reconcile;
 pub mod session;
-pub mod v2;

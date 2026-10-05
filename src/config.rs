@@ -20,7 +20,7 @@ pub struct AgentConfig {
     pub reconnect_delay_ms: u64,
     pub connect_timeout_ms: u64,
     pub wireguard: Option<WireGuardConfig>,
-    // Unused while job execution (transport::dispatch) is disconnected; these
+    // Unused while job execution (transport::dispatch, v2) is disconnected; these
     // fed RunnerEnvironment::Microvm/Container defaults and will again once
     // controllers/ops are rebuilt per plans/controlplane-agent-communicationsystem.md.
     #[allow(dead_code)]

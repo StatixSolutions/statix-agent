@@ -115,7 +115,7 @@ fn redact(value: &str) -> String {
     value
 }
 
-// Unused while job execution (transport::dispatch) is disconnected; only a
+// Unused while job execution (transport::dispatch, v2) is disconnected; only a
 // running job/deployment ever had output worth spooling here.
 #[allow(dead_code)]
 pub fn append_job(
