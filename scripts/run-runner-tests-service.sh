@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Optional: run a single test (substring filter) for a fast iteration loop.
+filter="${STATIX_RUNNER_TEST_FILTER:-}"
+if [ -n "$filter" ]; then
+    test_args="$filter --ignored --test-threads=1 --nocapture"
+    expected='running 1 test'
+else
+    test_args='jobs::runners::integration_tests:: --ignored --test-threads=1 --nocapture'
+    expected='running 4 tests'
+fi
+
 # Stop distro-managed LXC networking so the agent exercises its own setup.
 systemctl stop lxc-net.service dnsmasq.service
 ip link show lxcbr0 >/dev/null 2>&1 || ip link add name lxcbr0 type bridge
@@ -16,12 +26,12 @@ install -d -m 0755 /run/lxc
 
 # Use the shipped unit unchanged, with only test command/lifecycle overrides.
 mkdir -p /etc/systemd/system/statix-agent.service.d
-cat > /etc/systemd/system/statix-agent.service.d/tests.conf <<'EOF'
+cat > /etc/systemd/system/statix-agent.service.d/tests.conf <<EOF
 [Service]
 Type=oneshot
 Restart=no
 ExecStart=
-ExecStart=/opt/statix/runner-tests jobs::runners::integration_tests:: --ignored --test-threads=1 --nocapture
+ExecStart=/opt/statix/runner-tests $test_args
 Environment=STATIX_MICROVM_TEST_IMAGE=/fixtures/test.qcow2
 Environment=STATIX_RUNNER_TEST_SYSTEMD=1
 TimeoutStartSec=30min
@@ -31,11 +41,16 @@ systemctl cat statix-agent.service
 systemctl show statix-agent.service --property=User,Group,ProtectSystem,ProtectHome,ReadWritePaths,ReadOnlyPaths,PrivateTmp,StateDirectory
 
 status=0
+# Stream the unit's output live; the oneshot start below blocks until done.
+journalctl --unit=statix-agent.service --follow --lines=0 --no-pager --output=cat &
+follower=$!
 systemctl start statix-agent.service || status=$?
 journalctl --sync
+sleep 1 # let the follower drain the final lines
+kill "$follower" 2>/dev/null || true
+wait "$follower" 2>/dev/null || true
 journalctl --unit=statix-agent.service --no-pager --output=cat > /tmp/runner-tests-journal.log
-cat /tmp/runner-tests-journal.log
-if ! grep -Fx 'running 2 tests' /tmp/runner-tests-journal.log >/dev/null \
+if ! grep -Fx "$expected" /tmp/runner-tests-journal.log >/dev/null \
     || ! grep '^test result:' /tmp/runner-tests-journal.log >/dev/null; then
     echo 'Test infrastructure failure: Rust test harness did not finish' >&2
     exit 1
