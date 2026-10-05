@@ -20,9 +20,16 @@ pub struct AgentConfig {
     pub reconnect_delay_ms: u64,
     pub connect_timeout_ms: u64,
     pub wireguard: Option<WireGuardConfig>,
+    // Unused while job execution (transport::dispatch, v2) is disconnected; these
+    // fed RunnerEnvironment::Microvm/Container defaults and will again once
+    // controllers/ops are rebuilt per plans/controlplane-agent-communicationsystem.md.
+    #[allow(dead_code)]
     pub microvm_default_image: String,
+    #[allow(dead_code)]
     pub microvm_default_cpu: u8,
+    #[allow(dead_code)]
     pub microvm_default_memory_mb: u32,
+    #[allow(dead_code)]
     pub container_default_image: String,
 }
 
