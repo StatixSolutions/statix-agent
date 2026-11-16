@@ -1,0 +1,575 @@
+openapi: 3.1.0
+info:
+  title: Statix Agent Gateway
+  version: 2.0.0
+  description: |
+    Contract for the agent-initiated WebSocket between Statix and statix-agent.
+    Every text frame is a JSON Envelope. The `type` field selects the body
+    schema. Desired state is sent as a complete snapshot; status and events are
+    sent by the agent.
+  contact:
+    name: Statix
+servers:
+  - url: https://api.statix.example.com
+    description: Production API (placeholder)
+paths:
+  /ws/agent:
+    get:
+      summary: Agent control-plane WebSocket
+      description: |
+        The agent opens this connection. The HTTP upgrade is authenticated by
+        the hello/challenge/auth exchange described by `x-websocket` below.
+      operationId: agentWebSocket
+      responses:
+        '101':
+          description: Switching Protocols; subsequent traffic is JSON Envelope frames.
+      x-websocket:
+        protocol: statix.node/v2
+        direction: bidirectional
+        messages:
+          - $ref: '#/components/schemas/HelloMessage'
+          - $ref: '#/components/schemas/ChallengeMessage'
+          - $ref: '#/components/schemas/AuthMessage'
+          - $ref: '#/components/schemas/WelcomeMessage'
+          - $ref: '#/components/schemas/GoawayMessage'
+          - $ref: '#/components/schemas/PingMessage'
+          - $ref: '#/components/schemas/PongMessage'
+          - $ref: '#/components/schemas/DesiredMessage'
+          - $ref: '#/components/schemas/StatusMessage'
+          - $ref: '#/components/schemas/EventMessage'
+          - $ref: '#/components/schemas/MetricsMessage'
+          - $ref: '#/components/schemas/SystemInfoMessage'
+          - $ref: '#/components/schemas/OpDispatchMessage'
+          - $ref: '#/components/schemas/OpCancelMessage'
+          - $ref: '#/components/schemas/OpResultMessage'
+          - $ref: '#/components/schemas/LogsSubscribeMessage'
+          - $ref: '#/components/schemas/LogsUnsubscribeMessage'
+          - $ref: '#/components/schemas/LogsChunkMessage'
+          - $ref: '#/components/schemas/LogsQueryMessage'
+          - $ref: '#/components/schemas/LogsResultMessage'
+          - $ref: '#/components/schemas/LogsCapabilitiesMessage'
+        lifecycle:
+          - agent -> server: hello
+          - server -> agent: challenge
+          - agent -> server: auth
+          - server -> agent: welcome, then desired
+          - both: ping/pong
+          - server -> agent: desired, op_dispatch, op_cancel, logs.subscribe, logs.unsubscribe
+          - agent -> server: status, event, metrics, system_info, op_result, logs.chunk, logs.result
+        reliability:
+          - id is a per-message ULID; ack, when present, references a message id.
+          - operation results are persisted and resent until acknowledged.
+          - desired is always a complete snapshot and is idempotent by object id and generation.
+          - unknown message types must not terminate the session.
+components:
+  x-messages:
+    Hello:
+      name: hello
+      summary: Agent capabilities and reconnect state
+      payload:
+        $ref: '#/components/schemas/HelloMessage'
+    Challenge:
+      name: challenge
+      summary: Server nonce for agent authentication
+      payload:
+        $ref: '#/components/schemas/ChallengeMessage'
+    Auth:
+      name: auth
+      summary: Agent identity and signature of the challenge nonce
+      payload:
+        $ref: '#/components/schemas/AuthMessage'
+    Welcome:
+      name: welcome
+      payload:
+        $ref: '#/components/schemas/WelcomeMessage'
+    Goaway:
+      name: goaway
+      payload:
+        $ref: '#/components/schemas/GoawayMessage'
+    Ping:
+      name: ping
+      payload:
+        $ref: '#/components/schemas/PingMessage'
+    Pong:
+      name: pong
+      payload:
+        $ref: '#/components/schemas/PongMessage'
+    Desired:
+      name: desired
+      payload:
+        $ref: '#/components/schemas/DesiredMessage'
+    Status:
+      name: status
+      payload:
+        $ref: '#/components/schemas/StatusMessage'
+    Event:
+      name: event
+      payload:
+        $ref: '#/components/schemas/EventMessage'
+    Metrics:
+      name: metrics
+      payload:
+        $ref: '#/components/schemas/MetricsMessage'
+    SystemInfo:
+      name: system_info
+      payload:
+        $ref: '#/components/schemas/SystemInfoMessage'
+    OpDispatch:
+      name: op_dispatch
+      payload:
+        $ref: '#/components/schemas/OpDispatchMessage'
+    OpCancel:
+      name: op_cancel
+      payload:
+        $ref: '#/components/schemas/OpCancelMessage'
+    OpResult:
+      name: op_result
+      payload:
+        $ref: '#/components/schemas/OpResultMessage'
+    LogsSubscribe:
+      name: logs.subscribe
+      payload:
+        $ref: '#/components/schemas/LogsSubscribeMessage'
+    LogsUnsubscribe:
+      name: logs.unsubscribe
+      payload:
+        $ref: '#/components/schemas/LogsUnsubscribeMessage'
+    LogsChunk:
+      name: logs.chunk
+      payload:
+        $ref: '#/components/schemas/LogsChunkMessage'
+    LogsQuery:
+      name: logs.query
+      payload:
+        $ref: '#/components/schemas/LogsQueryMessage'
+    LogsResult:
+      name: logs.result
+      payload:
+        $ref: '#/components/schemas/LogsResultMessage'
+    LogsCapabilities:
+      name: logs.capabilities
+      payload:
+        $ref: '#/components/schemas/LogsCapabilitiesMessage'
+  schemas:
+    Id:
+      type: string
+      minLength: 1
+      description: ULID in normal operation.
+    Timestamp:
+      type: string
+      format: date-time
+    Generation:
+      type: integer
+      format: int64
+      minimum: 0
+    Envelope:
+      type: object
+      required: [v, type, id, ts, body]
+      properties:
+        v:
+          const: 2
+        type:
+          type: string
+          minLength: 1
+        id:
+          $ref: '#/components/schemas/Id'
+        ack:
+          $ref: '#/components/schemas/Id'
+        ts:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Unix epoch milliseconds.
+        body: {}
+    HelloMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            type: { const: hello }
+            body: { $ref: '#/components/schemas/HelloBody' }
+    HelloBody:
+      type: object
+      required: [protocol, agentVersion, bootId, capabilities, observed, pendingOpResults]
+      properties:
+        protocol: { type: array, minItems: 1, items: { type: integer, minimum: 1 } }
+        agentVersion: { type: string, minLength: 1 }
+        bootId: { $ref: '#/components/schemas/Id' }
+        capabilities: { type: array, items: { type: string }, default: [] }
+        observed:
+          type: object
+          additionalProperties: { $ref: '#/components/schemas/Generation' }
+        pendingOpResults: { type: array, items: { $ref: '#/components/schemas/Id' }, default: [] }
+    ChallengeMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: challenge }, body: { $ref: '#/components/schemas/ChallengeBody' } }
+    AuthMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: auth }, body: { $ref: '#/components/schemas/AuthBody' } }
+    WelcomeMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: welcome }, body: { $ref: '#/components/schemas/WelcomeBody' } }
+    GoawayMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: goaway }, body: { $ref: '#/components/schemas/GoawayBody' } }
+    PingMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: ping }, body: { type: object, maxProperties: 0 } }
+    PongMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: pong }, body: { type: object, maxProperties: 0 } }
+    DesiredMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: desired }, body: { $ref: '#/components/schemas/NodeDesiredState' } }
+    StatusMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: status }, body: { $ref: '#/components/schemas/ObjectStatus' } }
+    EventMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: event }, body: { $ref: '#/components/schemas/NodeEvent' } }
+    MetricsMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: metrics }, body: { type: object, required: [ts], properties: { ts: { type: number } }, additionalProperties: true } }
+    SystemInfoMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: system_info }, body: { type: object, additionalProperties: true } }
+    OpDispatchMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: op_dispatch }, body: { $ref: '#/components/schemas/OpDispatchBody' } }
+    OpCancelMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: op_cancel }, body: { $ref: '#/components/schemas/OpCancelBody' } }
+    OpResultMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: op_result }, body: { $ref: '#/components/schemas/OpResultBody' } }
+    LogsSubscribeMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: logs.subscribe }, body: { $ref: '#/components/schemas/LogsSubscribeBody' } }
+    LogsUnsubscribeMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: logs.unsubscribe }, body: { $ref: '#/components/schemas/LogsUnsubscribeBody' } }
+    LogsChunkMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: logs.chunk }, body: { $ref: '#/components/schemas/LogsChunkBody' } }
+    LogsQueryMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: logs.query }, body: { $ref: '#/components/schemas/LogsQueryBody' } }
+    LogsResultMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: logs.result }, body: { $ref: '#/components/schemas/LogsResultBody' } }
+    LogsCapabilitiesMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: logs.capabilities }, body: { $ref: '#/components/schemas/LogsCapabilitiesBody' } }
+    AuthBody:
+      type: object
+      required: [nodeId, signature]
+      properties:
+        nodeId: { $ref: '#/components/schemas/Id' }
+        signature: { type: string, minLength: 1 }
+    ChallengeBody:
+      type: object
+      required: [nonce]
+      properties:
+        nonce: { type: string, minLength: 16 }
+    WelcomeBody:
+      type: object
+      required: [sessionId, heartbeatSec, resyncSec, serverTime]
+      properties:
+        sessionId: { $ref: '#/components/schemas/Id' }
+        heartbeatSec: { type: integer, minimum: 1, default: 15 }
+        resyncSec: { type: integer, minimum: 1, default: 300 }
+        serverTime: { $ref: '#/components/schemas/Timestamp' }
+        upgradeRequired: { type: boolean }
+    GoawayBody:
+      type: object
+      required: [retryAfterMs]
+      properties:
+        retryAfterMs: { type: integer, format: int64, minimum: 0 }
+    NodeDesiredState:
+      type: object
+      required: [nodeId, generation, runtimes, workloads]
+      properties:
+        nodeId: { $ref: '#/components/schemas/Id' }
+        generation: { $ref: '#/components/schemas/Generation' }
+        runtimes: { type: array, items: { $ref: '#/components/schemas/RuntimeSpec' } }
+        workloads: { type: array, items: { $ref: '#/components/schemas/WorkloadSpec' } }
+    ObjectMeta:
+      type: object
+      required: [id, projectId, nodeId, generation]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        projectId: { $ref: '#/components/schemas/Id' }
+        nodeId: { $ref: '#/components/schemas/Id' }
+        generation: { $ref: '#/components/schemas/Generation' }
+        labels: { type: object, additionalProperties: { type: string }, default: {} }
+    Resources:
+      type: object
+      required: [cpu, memoryMb, diskGb]
+      properties:
+        cpu: { type: number, exclusiveMinimum: 0 }
+        memoryMb: { type: integer, format: int64, exclusiveMinimum: 0 }
+        diskGb: { type: integer, format: int64, exclusiveMinimum: 0 }
+        gpu:
+          type: object
+          required: [count]
+          properties:
+            count: { type: integer, minimum: 1 }
+            vendor: { type: string, enum: [nvidia, amd, intel] }
+    RuntimeSpec:
+      type: object
+      required: [apiVersion, kind, meta, spec]
+      properties:
+        apiVersion: { const: statix.node/v1 }
+        kind: { const: Runtime }
+        meta: { $ref: '#/components/schemas/ObjectMeta' }
+        spec:
+          type: object
+          required: [type, image, resources, power]
+          properties:
+            type: { type: string, enum: [lxc, microvm] }
+            image: { type: string, minLength: 1 }
+            resources: { $ref: '#/components/schemas/Resources' }
+            power: { type: string, enum: [running, stopped] }
+    WorkloadSpec:
+      type: object
+      required: [apiVersion, kind, meta, spec]
+      properties:
+        apiVersion: { const: statix.node/v1 }
+        kind: { const: Workload }
+        meta: { $ref: '#/components/schemas/ObjectMeta' }
+        spec:
+          type: object
+          required: [runtimeId, engine, definitionRevision, networks, services, rollout]
+          properties:
+            runtimeId: { $ref: '#/components/schemas/Id' }
+            engine: { const: docker }
+            definitionRevision: { $ref: '#/components/schemas/Generation' }
+            networks:
+              type: object
+              additionalProperties:
+                type: object
+                required: [internal]
+                properties: { internal: { type: boolean } }
+            services: { type: array, minItems: 1, items: { $ref: '#/components/schemas/ServiceSpec' } }
+            rollout:
+              type: object
+              required: [strategy, healthTimeoutSec, autoRollback]
+              properties:
+                strategy: { type: string, enum: [recreate, start-first] }
+                healthTimeoutSec: { type: integer, minimum: 1 }
+                autoRollback: { type: boolean }
+    ServiceSpec:
+      type: object
+      required: [name, image, env, secrets, mounts, ports, networks, restart, dependsOn]
+      properties:
+        name: { type: string, minLength: 1 }
+        image: { type: string, minLength: 1 }
+        command: { type: array, items: { type: string } }
+        entrypoint: { type: array, items: { type: string } }
+        env: { type: object, additionalProperties: { type: string } }
+        secrets:
+          type: array
+          items:
+            type: object
+            required: [env, secretRef]
+            properties:
+              env: { type: string, minLength: 1 }
+              secretRef:
+                type: object
+                required: [id, key]
+                properties: { id: { $ref: '#/components/schemas/Id' }, key: { type: string, minLength: 1 } }
+        mounts:
+          type: array
+          items:
+            type: object
+            required: [source, target, readOnly]
+            properties:
+              source: { type: string, minLength: 1 }
+              target: { type: string, minLength: 1 }
+              readOnly: { type: boolean }
+        ports:
+          type: array
+          items:
+            type: object
+            required: [container, protocol]
+            properties:
+              name: { type: string }
+              container: { type: integer, minimum: 1, maximum: 65535 }
+              protocol: { type: string, enum: [tcp, udp] }
+        expose:
+          type: object
+          required: [protocol]
+          properties:
+            targetPort: { type: integer, minimum: 1, maximum: 65535 }
+            protocol: { type: string, enum: [tcp, udp] }
+            bridgeIp: { type: string }
+            bridgePort: { type: integer, minimum: 1, maximum: 65535 }
+        networks: { type: array, minItems: 1, items: { type: string, minLength: 1 } }
+        restart: { type: string, enum: [no, on-failure, always, unless-stopped] }
+        healthcheck:
+          type: object
+          required: [command, intervalSec, timeoutSec, retries, startPeriodSec]
+          properties:
+            command: { type: array, minItems: 1, items: { type: string } }
+            intervalSec: { type: integer, minimum: 1 }
+            timeoutSec: { type: integer, minimum: 1 }
+            retries: { type: integer, minimum: 1 }
+            startPeriodSec: { type: integer, minimum: 0 }
+        limits:
+          type: object
+          properties:
+            cpu: { type: number, exclusiveMinimum: 0 }
+            memoryMb: { type: integer, format: int64, exclusiveMinimum: 0 }
+        dependsOn: { type: array, items: { type: string, minLength: 1 } }
+    ObjectStatus:
+      type: object
+      required: [id, kind, nodeId, observedGeneration, phase, conditions, reportedAt]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        kind: { type: string, enum: [Runtime, Workload] }
+        nodeId: { $ref: '#/components/schemas/Id' }
+        observedGeneration: { $ref: '#/components/schemas/Generation' }
+        phase: { type: string, enum: [Pending, Progressing, Ready, Degraded, Failed, Terminating, Unknown] }
+        conditions: { type: array, items: { $ref: '#/components/schemas/Condition' } }
+        services: { type: array, items: { $ref: '#/components/schemas/ServiceStatus' } }
+        lastError:
+          type: object
+          required: [reason, message, at]
+          properties: { reason: { type: string }, message: { type: string }, at: { $ref: '#/components/schemas/Timestamp' } }
+        reportedAt: { $ref: '#/components/schemas/Timestamp' }
+    Condition:
+      type: object
+      required: [type, status, lastTransitionAt]
+      properties:
+        type: { type: string, minLength: 1 }
+        status: { type: string, enum: [True, False, Unknown] }
+        reason: { type: string }
+        message: { type: string }
+        lastTransitionAt: { $ref: '#/components/schemas/Timestamp' }
+    ServiceStatus:
+      type: object
+      required: [name, state, health, restartCount, oomKilled]
+      properties:
+        name: { type: string, minLength: 1 }
+        containerId: { type: string }
+        imageDigest: { type: string }
+        state: { type: string, enum: [created, running, restarting, exited, dead, missing] }
+        health: { type: string, enum: [healthy, unhealthy, starting, none] }
+        restartCount: { type: integer, minimum: 0 }
+        exitCode: { type: integer }
+        oomKilled: { type: boolean }
+        startedAt: { $ref: '#/components/schemas/Timestamp' }
+    NodeEvent:
+      type: object
+      required: [id, nodeId, severity, reason, message, at]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        nodeId: { $ref: '#/components/schemas/Id' }
+        projectId: { $ref: '#/components/schemas/Id' }
+        objectId: { $ref: '#/components/schemas/Id' }
+        generation: { $ref: '#/components/schemas/Generation' }
+        severity: { type: string, enum: [info, warning, error] }
+        reason: { type: string }
+        message: { type: string }
+        at: { $ref: '#/components/schemas/Timestamp' }
+    OperationSpec:
+      oneOf:
+        - { type: object, required: [kind], properties: { kind: { const: update_agent }, targetVersion: { type: string }, channel: { type: string } } }
+        - { type: object, required: [kind, workloadId, service], properties: { kind: { const: restart_service }, workloadId: { $ref: '#/components/schemas/Id' }, service: { type: string, minLength: 1 } } }
+        - { type: object, required: [kind, source, args], properties: { kind: { const: run_test }, source: { type: object, required: [repoUrl, ref, commitSha], properties: { repoUrl: { type: string, format: uri }, ref: { type: string }, commitSha: { type: string }, subdir: { type: string } } }, args: { type: array, items: { type: string } }, timeoutSec: { type: integer, minimum: 1, maximum: 3600 } } }
+        - { type: object, required: [kind], properties: { kind: { const: collect_diagnostics }, objectId: { $ref: '#/components/schemas/Id' } } }
+      discriminator: { propertyName: kind }
+    OpDispatchBody:
+      type: object
+      required: [opId, spec, leaseExpiresAt]
+      properties: { opId: { $ref: '#/components/schemas/Id' }, spec: { $ref: '#/components/schemas/OperationSpec' }, leaseExpiresAt: { $ref: '#/components/schemas/Timestamp' } }
+    OpCancelBody:
+      type: object
+      required: [opId]
+      properties: { opId: { $ref: '#/components/schemas/Id' } }
+    OpResultBody:
+      type: object
+      required: [opId, status]
+      properties: { opId: { $ref: '#/components/schemas/Id' }, status: { type: string, enum: [accepted, running, succeeded, failed, rejected] }, reason: { type: string }, message: { type: string } }
+    LogsSubscribeBody:
+      type: object
+      required: [subId, scope, resourceId]
+      properties: { subId: { $ref: '#/components/schemas/Id' }, scope: { type: string, enum: [operation, workload] }, resourceId: { $ref: '#/components/schemas/Id' } }
+    LogsUnsubscribeBody:
+      type: object
+      required: [subId]
+      properties: { subId: { $ref: '#/components/schemas/Id' } }
+    LogsChunkBody:
+      type: object
+      required: [subId, seq, stream, line, ts]
+      properties: { subId: { $ref: '#/components/schemas/Id' }, seq: { type: integer, minimum: 0 }, stream: { type: string, enum: [stdout, stderr] }, line: { type: string }, ts: { $ref: '#/components/schemas/Timestamp' } }
+    LogsQueryBody:
+      type: object
+      required: [requestId]
+      properties: { requestId: { type: string, minLength: 1 }, scope: { type: string }, resourceId: { type: string }, cursor: { type: string }, limit: { type: integer, minimum: 1 } }
+    LogsResultBody:
+      type: object
+      required: [requestId, records]
+      properties: { requestId: { type: string, minLength: 1 }, records: { type: array, items: { type: object, additionalProperties: true } }, nextCursor: { type: string } }
+    LogsCapabilitiesBody:
+      type: object
+      additionalProperties: true
+    MessageBodies:
+      oneOf:
+        - { $ref: '#/components/schemas/HelloBody' }
+        - { $ref: '#/components/schemas/ChallengeBody' }
+        - { $ref: '#/components/schemas/AuthBody' }
+        - { $ref: '#/components/schemas/WelcomeBody' }
+        - { $ref: '#/components/schemas/GoawayBody' }
+        - { $ref: '#/components/schemas/NodeDesiredState' }
+        - { $ref: '#/components/schemas/ObjectStatus' }
+        - { $ref: '#/components/schemas/NodeEvent' }
+        - { $ref: '#/components/schemas/OpDispatchBody' }
+        - { $ref: '#/components/schemas/OpCancelBody' }
+        - { $ref: '#/components/schemas/OpResultBody' }
+        - { $ref: '#/components/schemas/LogsSubscribeBody' }
+        - { $ref: '#/components/schemas/LogsUnsubscribeBody' }
+        - { $ref: '#/components/schemas/LogsChunkBody' }
+        - { $ref: '#/components/schemas/LogsQueryBody' }
+        - { $ref: '#/components/schemas/LogsResultBody' }
+        - { $ref: '#/components/schemas/LogsCapabilitiesBody' }
