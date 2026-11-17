@@ -35,6 +35,7 @@ ExecStart=/opt/statix/runner-tests $test_args
 Environment=STATIX_MICROVM_TEST_IMAGE=/fixtures/test.qcow2
 Environment=STATIX_RUNNER_TEST_SYSTEMD=1
 Environment=STATIX_VERBOSE_LOGS=1
+Environment=STATIX_LXC_HELPER_PATH=/usr/local/libexec/statix-agent-lxc
 NoNewPrivileges=no
 TimeoutStartSec=30min
 EOF
