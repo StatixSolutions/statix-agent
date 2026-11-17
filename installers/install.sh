@@ -45,15 +45,19 @@ prepare_host() {
 
 disable_legacy() {
   local unit
-  for unit in statix-agent-update.service statix-agent-update.timer; do
+  for unit in statix-agent.service statix-agent-update.service statix-agent-update.timer; do
     systemctl disable --now "$unit" >/dev/null 2>&1 || true
   done
-  # The files are retained for recovery but cannot remain in the active path.
-  local legacy_dir="$STATE_DIR/legacy"
-  install -d -m 0700 "$legacy_dir"
-  for path in /usr/local/lib/statix/update.sh /usr/local/lib/statix/statix-agent-dependencies.sh; do
-    if [[ -f "$path" ]]; then mv "$path" "$legacy_dir/$(basename "$path").old"; fi
-  done
+  rm -f \
+    /usr/local/bin/statix-agent \
+    /usr/local/lib/statix/update.sh \
+    /usr/local/lib/statix/statix-agent-dependencies.sh \
+    /usr/local/libexec/statix-agent-lxc \
+    /usr/local/libexec/statix-agent-network \
+    /etc/systemd/system/statix-agent.service \
+    /etc/systemd/system/statix-agent-update.service \
+    /etc/systemd/system/statix-agent-update.timer \
+    /etc/sudoers.d/statix-agent
 }
 
 install_profiles() {
@@ -75,6 +79,7 @@ ExecStart=$PROFILE/bin/statix-agent run
 Environment=STATIX_AGENT_CONFIG=$CONFIG_DIR/agent.json
 Environment=STATIX_AGENT_STATE_DIR=$STATE_DIR
 Environment=HOME=$STATE_DIR
+Environment=STATIX_LXC_HELPER_PATH=$PROFILE/bin/statix-agent-lxc
 Restart=always
 RestartSec=5s
 KillSignal=SIGINT
@@ -95,6 +100,14 @@ STATIX_AGENT_PROFILE=$(printf '%q' "$PROFILE")
 STATIX_AGENT_STATE_DIR=$(printf '%q' "$STATE_DIR/update")
 EOF
   chmod 0640 /etc/statix/update.conf
+  cat >/etc/sudoers.d/statix-agent <<EOF
+Defaults!$PROFILE/bin/statix-agent-lxc secure_path="$PROFILE/bin:/usr/bin:/bin"
+$SERVICE_USER ALL=(root) NOPASSWD: $PROFILE/bin/statix-agent-lxc *
+EOF
+  chmod 0440 /etc/sudoers.d/statix-agent
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf /etc/sudoers.d/statix-agent >/dev/null
+  fi
   cat >/etc/systemd/system/statix-agent-update.service <<EOF
 [Unit]
 Description=Update Statix Agent Nix generation

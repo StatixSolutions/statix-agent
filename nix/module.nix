@@ -155,6 +155,7 @@ in
       environment = {
         STATIX_AGENT_CONFIG = toString cfg.configFile;
         STATIX_AGENT_STATE_DIR = cfg.stateDir;
+        STATIX_LXC_HELPER_PATH = "${runtimePackage}/bin/statix-agent-lxc";
         HOME = cfg.stateDir;
       };
 

@@ -18,8 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && systemctl disable lxc-net.service dnsmasq.service
 
 COPY --from=build /runner-tests /opt/statix/runner-tests
-COPY installers/ubuntu/24.04/statix-agent-lxc-helper /usr/local/libexec/statix-agent-lxc
-COPY installers/ubuntu/24.04/statix-agent.service /etc/systemd/system/statix-agent.service
+COPY installers/common/statix-agent-lxc-helper /usr/local/libexec/statix-agent-lxc
+COPY installers/common/statix-agent-agent-test.service /etc/systemd/system/statix-agent.service
 COPY scripts/run-runner-tests-service.sh /opt/statix/run-runner-tests-service.sh
 RUN chmod 0755 /usr/local/libexec/statix-agent-lxc \
     && printf '%s\n' \

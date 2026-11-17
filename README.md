@@ -35,25 +35,15 @@ Inspect or operate updates with:
 sudo systemctl start statix-agent-update.service
 ```
 
-The old per-distribution installers and updater remain only as migration
-artifacts during rollout; they are not part of the new release path.
+The old per-distribution installers, updater, dependency installer, and
+migration bundle have been removed. The Nix bootstrap is the only installation
+path.
 
 NixOS hosts should manage `services.statix-agent.package` through their normal
 system flake and `nixos-rebuild`; the on-demand update service is for hosts
 installed through the standalone bootstrap.
 
-Host migrations are cumulative release assets. New migration scripts go under
-`migrations/` with a unique four-digit prefix and are never renamed or removed
-after release. The updater records the last successful migration in
-`/var/lib/statix-agent/migrations/state.json` and retries pending migrations on
-the next update if one fails.
-
-The first release containing the migration runner must be installed on existing
-hosts with the platform installer once, because older updater scripts cannot
-execute migrations they do not contain. Subsequent updates apply pending
-migrations automatically.
-
-Agent upgrades are control-plane updates. The service units use
+Agent upgrades are control-plane updates. The service uses
 `KillMode=process` so long-lived deployed LXC/Docker runtimes and project
 MicroVM processes are not stopped when the agent is restarted. Runtime state is
 kept under the agent state directory so a new agent instance can reconnect to

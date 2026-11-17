@@ -67,7 +67,7 @@ impl LxcContainer {
             );
         }
 
-        if !Path::new(lxc_helper_path()).is_file() {
+        if !Path::new(&lxc_helper_path()).is_file() {
             bail!(
                 "Missing LXC privilege helper at {}; reinstall statix-agent",
                 lxc_helper_path()
@@ -721,8 +721,10 @@ fn lxc_std_command(program: &str) -> StdCommand {
     command
 }
 
-fn lxc_helper_path() -> &'static str {
-    "/usr/local/libexec/statix-agent-lxc"
+fn lxc_helper_path() -> String {
+    std::env::var("STATIX_LXC_HELPER_PATH").unwrap_or_else(|_| {
+        "/nix/var/nix/profiles/statix-agent/bin/statix-agent-lxc".to_owned()
+    })
 }
 
 fn lxc_process_home() -> Option<PathBuf> {
@@ -924,7 +926,7 @@ mod tests {
         assert_eq!(command[0], "env");
         assert!(command[1].starts_with("STATIX_AGENT_STATE_DIR="));
         assert_eq!(command[2], "sudo");
-        assert_eq!(command[5], "/usr/local/libexec/statix-agent-lxc");
+        assert!(command[5].ends_with("/bin/statix-agent-lxc"));
         assert_eq!(command[6], "lxc-attach");
         assert!(
             command

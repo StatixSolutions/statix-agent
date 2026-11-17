@@ -6,5 +6,5 @@ cache. The orchestration plane sends an immutable update operation; the Rust
 update worker realizes and health-checks that generation before activation and
 rolls back on failure.
 
-The older distro-specific shell assets are retained only for migration and are
-not used by the new update path.
+The old distro-specific shell assets are removed; this directory contains only
+the shared bootstrap support and Nix-packaged host helper.
