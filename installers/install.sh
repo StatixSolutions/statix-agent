@@ -20,6 +20,35 @@ command -v systemctl >/dev/null || fail "systemd is required"
 [[ -r /etc/os-release ]] || fail "cannot detect Linux distribution"
 
 install_nix() {
+  # The installer is commonly run through `sudo ... bash`, so it does not
+  # inherit the interactive shell setup that adds an existing daemon install
+  # to PATH. Load the standard profile first; otherwise reinstalling an agent
+  # attempts to install Nix a second time and the Nix installer aborts when its
+  # backup files already exist.
+  for profile in \
+    /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh \
+    /etc/profile.d/nix-daemon.sh \
+    /root/.nix-profile/etc/profile.d/nix.sh; do
+    if [[ -r "$profile" ]]; then
+      # shellcheck disable=SC1090
+      . "$profile"
+    fi
+  done
+
+  # Keep detection working even when the profile script is missing or has not
+  # added the daemon profile to PATH yet.
+  for nix_bin in \
+    /nix/var/nix/profiles/default/bin/nix \
+    /run/current-system/sw/bin/nix \
+    /root/.nix-profile/bin/nix; do
+    if [[ -x "$nix_bin" ]]; then
+      PATH="${nix_bin%/*}:$PATH"
+      export PATH
+      break
+    fi
+  done
+
+  hash -r 2>/dev/null || true
   if command -v nix >/dev/null 2>&1; then return; fi
   command -v curl >/dev/null 2>&1 || fail "curl is required to bootstrap Nix"
   log "installing the Nix daemon"
