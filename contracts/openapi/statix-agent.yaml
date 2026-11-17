@@ -514,12 +514,11 @@ components:
         at: { $ref: '#/components/schemas/Timestamp' }
     OperationSpec:
       type: object
-      required: [kind, flakeRef, revision, package]
+      required: [kind, flakeRef, revision]
       properties:
         kind: { const: update_agent }
         flakeRef: { type: string, minLength: 1 }
         revision: { type: string, minLength: 1 }
-        package: { type: string, minLength: 1 }
     OpDispatchBody:
       type: object
       required: [opId, spec, leaseExpiresAt]

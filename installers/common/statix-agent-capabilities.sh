@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-STATE_DIR="${STATIX_AGENT_STATE_DIR:-/var/lib/statix-agent}"
-
 has() { command -v "$1" >/dev/null 2>&1; }
 
 capability() {

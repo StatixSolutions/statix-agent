@@ -138,7 +138,6 @@ pub enum OperationSpec {
 pub struct UpdateAgentSpec {
     pub flake_ref: String,
     pub revision: String,
-    pub package: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -732,13 +731,13 @@ mod tests {
     #[test]
     fn decodes_immutable_update_operation() {
         let message = decode(
-            r#"{"v":2,"type":"op_dispatch","id":"1","ts":0,"body":{"opId":"op1","leaseExpiresAt":"2099-01-01T00:00:00Z","spec":{"kind":"update_agent","flakeRef":"github:example/agent","revision":"abc123","package":"statix-agent"}}}"#,
+            r#"{"v":2,"type":"op_dispatch","id":"1","ts":0,"body":{"opId":"op1","leaseExpiresAt":"2099-01-01T00:00:00Z","spec":{"kind":"update_agent","flakeRef":"github:example/agent","revision":"abc123"}}}"#,
         )
         .unwrap();
         assert!(matches!(message, IncomingMessage::OpDispatch(body)
             if body.op_id == "op1"
                 && matches!(body.spec, OperationSpec::UpdateAgent(ref spec)
-                    if spec.revision == "abc123" && spec.package == "statix-agent")));
+                    if spec.revision == "abc123")));
     }
 
     #[test]

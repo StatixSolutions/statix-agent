@@ -15,23 +15,34 @@ let
     text = builtins.readFile ../installers/common/statix-agent-capabilities.sh;
   };
   generatedConfig = json.generate "statix-agent.json" cfg.settings;
-  microvmRuntimeDeps = [
-    pkgs.cloud-utils
-    pkgs.openssh
-    pkgs.qemu-utils
-    pkgs.qemu_kvm
+  runtimeDependencies = with pkgs; [
+    cacert
+    cloud-utils
+    curl
+    dnsmasq
+    docker
+    gawk
+    iproute2
+    iptables
+    lxc
+    nginx
+    openssh
+    pciutils
+    procps
+    qemu-utils
+    qemu_kvm
+    shadow
+    sudo
+    systemd
+    util-linux
+    wget
+    wireguard-tools
+    xz
   ];
-  lxcRuntimeDeps = [
-    pkgs.dnsmasq
-    pkgs.gawk
-    pkgs.iproute2
-    pkgs.lxc
-    pkgs.iptables
-    pkgs.procps
-    pkgs.util-linux
-    pkgs.wget
-    pkgs.xz
-  ];
+  runtimePackage = pkgs.symlinkJoin {
+    name = "statix-agent-runtime";
+    paths = [ cfg.package capabilityPackage ] ++ runtimeDependencies;
+  };
   microvmPreStartScript = pkgs.writeShellScript "statix-agent-microvm-pre-start" ''
     set -euo pipefail
 
@@ -90,11 +101,6 @@ in
       };
     };
 
-    wireguardTools = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = "Install WireGuard tooling used for node enrollment and optional tunnel setup.";
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -119,13 +125,7 @@ in
     };
 
     environment.systemPackages = [
-      cfg.package
-      capabilityPackage
-    ]
-    ++ lib.optionals cfg.microvm.enable microvmRuntimeDeps
-    ++ lxcRuntimeDeps
-    ++ lib.optionals cfg.wireguardTools [
-      pkgs.wireguard-tools
+      runtimePackage
     ];
 
     environment.etc = lib.optionalAttrs (cfg.settings != null) {
@@ -158,7 +158,7 @@ in
         HOME = cfg.stateDir;
       };
 
-      path = lxcRuntimeDeps ++ lib.optionals cfg.microvm.enable microvmRuntimeDeps;
+      path = [ runtimePackage ];
 
       serviceConfig = {
         Type = "simple";

@@ -13,6 +13,7 @@ use crate::config::agent_state_dir;
 use crate::transport::protocol::{Id, OpResultBody, UpdateAgentSpec, now_rfc3339};
 
 const PROFILE: &str = "/nix/var/nix/profiles/statix-agent";
+const PACKAGE: &str = "statix-agent-runtime";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,9 +87,6 @@ pub fn accept(
 ) -> Result<(UpdateOperation, bool)> {
     if target.flake_ref.trim().is_empty() || target.revision.trim().is_empty() {
         bail!("update requires an immutable flakeRef and revision");
-    }
-    if target.package.trim().is_empty() {
-        bail!("update requires a package attribute");
     }
     let expires = time::OffsetDateTime::parse(
         &lease_expires_at,
@@ -184,7 +182,7 @@ pub fn run_worker() -> Result<()> {
     write_operation(&operation)?;
 
     let target = &operation.target;
-    let reference = format!("{}?rev={}#{}", target.flake_ref, target.revision, target.package);
+    let reference = format!("{}?rev={}#{}", target.flake_ref, target.revision, PACKAGE);
     let install = Command::new("nix")
         .args(["profile", "install", "--profile", PROFILE, &reference])
         .output()
@@ -246,7 +244,6 @@ mod tests {
             UpdateAgentSpec {
                 flake_ref: "github:example/agent".to_owned(),
                 revision: String::new(),
-                package: "statix-agent".to_owned(),
             },
             "2099-01-01T00:00:00Z".to_owned(),
         );

@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # agent dependencies.
 
 FLAKE_URL="${STATIX_FLAKE_URL:-github:StatixSolutions/statix-agent}"
-FLAKE_ATTR="${STATIX_FLAKE_ATTR:-statix-agent}"
+FLAKE_ATTR="${STATIX_FLAKE_ATTR:-statix-agent-runtime}"
 PROFILE="${STATIX_AGENT_PROFILE:-/nix/var/nix/profiles/statix-agent}"
 CONFIG_DIR="${STATIX_CONFIG_DIR:-/etc/statix}"
 STATE_DIR="${STATIX_AGENT_STATE_DIR:-/var/lib/statix-agent}"

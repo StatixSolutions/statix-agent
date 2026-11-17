@@ -12,6 +12,10 @@ Nodes install the exact revision into a Nix profile when commanded by the
 orchestration plane; they never poll, run a timer, consume a mutable `latest`
 URL, or execute a release-provided dependency script.
 
+The installed target is `statix-agent-runtime`, a Nix closure containing the
+agent and its host tools: LXC, QEMU/KVM utilities, networking, nginx, SSH,
+cloud-image tooling, WireGuard, Docker tooling, and supporting utilities.
+
 Install a systemd Linux host with:
 
 ```bash

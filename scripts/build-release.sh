@@ -9,9 +9,9 @@ mkdir -p "$out"
 
 case "$mode" in
   all|binary)
-    nix build --print-build-logs .#packages.x86_64-linux.statix-agent \
+    nix build --print-build-logs .#packages.x86_64-linux.statix-agent-runtime \
       --out-link "$out/statix-agent-x86_64-linux"
-    nix build --print-build-logs .#packages.aarch64-linux.statix-agent \
+    nix build --print-build-logs .#packages.aarch64-linux.statix-agent-runtime \
       --out-link "$out/statix-agent-aarch64-linux"
     ;;
   shared)
