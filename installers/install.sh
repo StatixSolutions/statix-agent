@@ -94,6 +94,13 @@ install_profiles() {
   nix "${features[@]}" profile install --profile "$PROFILE" "$FLAKE_URL#$FLAKE_ATTR"
 }
 
+install_command() {
+  local command_path=/usr/local/bin/statix-agent
+  install -d -m 0755 "${command_path%/*}"
+  ln -sfn "$PROFILE/bin/statix-agent" "$command_path"
+  [[ -x "$command_path" ]] || fail "installed agent command is not executable at $command_path"
+}
+
 install_units() {
   install -d -m 0755 /etc/systemd/system
   cat >/etc/systemd/system/statix-agent.service <<EOF
@@ -155,6 +162,7 @@ install_nix
 prepare_host
 disable_legacy
 install_profiles
+install_command
 install_units
 "$PROFILE/bin/statix-agent-capabilities" --json > "$STATE_DIR/capabilities.json" 2>/dev/null || true
 systemctl restart statix-agent.service

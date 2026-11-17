@@ -23,8 +23,9 @@ curl -fsSL https://raw.githubusercontent.com/StatixSolutions/statix-agent/main/i
   | sudo STATIX_FLAKE_URL=github:StatixSolutions/statix-agent bash
 ```
 
-The installer installs the Nix daemon, creates the agent profile, and installs
-an on-demand update service. An orchestration `update_agent` operation supplies
+The installer installs the Nix daemon, creates the agent profile, exposes the
+agent as `/usr/local/bin/statix-agent`, and installs an on-demand update
+service. An orchestration `update_agent` operation supplies
 an exact release revision. The agent realizes a new generation before
 activation, restarts only the agent control plane, checks health and
 capabilities, and rolls back the profile on failure.
