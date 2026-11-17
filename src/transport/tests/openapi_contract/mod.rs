@@ -6,11 +6,11 @@
 use std::collections::BTreeSet;
 
 use jsonschema::JSONSchema;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::transport::protocol::encode;
 
-const OPENAPI: &str = include_str!("../../../contracts/openapi/statix-agent.yaml");
+const OPENAPI: &str = include_str!("../../../../contracts/openapi/statix-agent.yaml");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Direction {
@@ -178,19 +178,6 @@ fn spec_message_names(doc: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-#[test]
-fn agent_websocket_route_is_declared_as_a_websocket_upgrade() {
-    let doc = document();
-    let operation = &doc["paths"]["/ws/agent"]["get"];
-    assert_eq!(operation["operationId"], "agentWebSocket");
-    assert_eq!(
-        operation["responses"]["101"]["description"],
-        "Switching Protocols; subsequent traffic is JSON Envelope frames."
-    );
-    assert_eq!(operation["x-websocket"]["protocol"], "statix.node/v2");
-    assert_eq!(operation["x-websocket"]["direction"], "bidirectional");
-}
-
 fn schema_name_for_message(doc: &Value, kind: &str) -> String {
     doc["components"]["x-messages"]
         .as_object()
@@ -252,54 +239,8 @@ fn every_spec_message_has_an_explicit_implementation_entry() {
 }
 
 #[test]
-fn every_implemented_message_is_schema_valid() {
-    let doc = document();
-    let mut failures = Vec::new();
-    for item in IMPLEMENTATIONS.iter().filter(|item| item.implemented) {
-        let body = match item.kind {
-            "hello" => {
-                json!({"protocol":[2],"agentVersion":"0.1.0","bootId":"01J","capabilities":[],"observed":{},"pendingOpResults":[]})
-            }
-            "challenge" => json!({"nonce":"0123456789abcdef"}),
-            "auth" => json!({"nodeId":"n1","signature":"signature"}),
-            "welcome" => {
-                json!({"sessionId":"s1","heartbeatSec":15,"resyncSec":300,"serverTime":"2026-01-01T00:00:00Z"})
-            }
-            "goaway" => json!({"retryAfterMs":0}),
-            "ping" | "pong" => json!({}),
-            "desired" => json!({"nodeId":"n1","generation":0,"runtimes":[],"workloads":[]}),
-            "status" => {
-                json!({"id":"r1","kind":"Runtime","nodeId":"n1","observedGeneration":0,"phase":"Pending","conditions":[],"reportedAt":"2026-01-01T00:00:00Z"})
-            }
-            "event" => {
-                json!({"id":"e1","nodeId":"n1","severity":"info","reason":"Test","message":"test","at":"2026-01-01T00:00:00Z"})
-            }
-            "metrics" => json!({"ts":1}),
-            "system_info" => json!({}),
-            "logs.query" => json!({"requestId":"r1"}),
-            "logs.result" => json!({"requestId":"r1","records":[]}),
-            "logs.capabilities" => json!({}),
-            other => panic!("implemented message `{other}` needs a contract fixture"),
-        };
-        let result = std::panic::catch_unwind(|| validate_message(&doc, item.kind, body));
-        if result.is_err() {
-            failures.push(item.kind);
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "schema failures: {}",
-        failures.join(", ")
-    );
-}
-
-#[test]
 fn unsupported_messages_are_reported_as_warnings() {
-    let unsupported = IMPLEMENTATIONS
-        .iter()
-        .filter(|item| !item.implemented)
-        .collect::<Vec<_>>();
-    for item in &unsupported {
+    for item in IMPLEMENTATIONS.iter().filter(|item| !item.implemented) {
         eprintln!(
             "WARNING contract: `{}` ({}) is specified but not implemented or executable-tested",
             item.kind,
@@ -320,4 +261,20 @@ fn implemented_messages_have_behavior_tests_registered() {
         "implemented messages without behavior tests: {}",
         missing.join(", ")
     );
+}
+
+mod route {
+    include!("route.rs");
+}
+
+mod handshake {
+    include!("handshake.rs");
+}
+
+mod state {
+    include!("state.rs");
+}
+
+mod logs {
+    include!("logs.rs");
 }

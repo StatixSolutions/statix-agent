@@ -593,7 +593,7 @@ mod tests {
     use super::*;
 
     mod openapi_contract {
-        include!("tests/openapi_contract.rs");
+        include!("tests/openapi_contract/mod.rs");
     }
 
     #[test]
