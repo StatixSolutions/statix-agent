@@ -1,0 +1,11 @@
+[Unit]
+Description=Statix Agent runner integration test harness
+
+[Service]
+Type=simple
+ExecStart=/bin/true
+User=statix-agent
+Group=statix-agent
+KillMode=process
+StateDirectory=statix-agent
+ReadWritePaths=/var/lib/statix-agent

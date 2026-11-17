@@ -2,52 +2,48 @@
 
 Project layout:
 
-This repo contains:
-- the Rust `statix` agent binary
-- Ubuntu installer assets under `installers/ubuntu/24.04`
-- Arch Linux installer assets under `installers/archlinux`
-- Debian installer assets under `installers/debian`
-- the host-side systemd units and updater script
+This repo contains the Rust `statix-agent`, its Nix flake, an on-demand update
+worker, and capability-aware host integration for systemd Linux systems.
 
-## Releases
+## Releases and updates
 
-The expected public release assets are:
-- `statix-agent-linux-amd64`
-- `statix-agent-linux-arm64`
-- matching `.sha256` files
-- `statix-agent-dependencies.sh` and its `.sha256` file
-- `statix-agent-migrations.tar.gz` and its `.sha256` file
-- `statix-agent-migrations.json` and its `.sha256` file
-- distro-specific installer assets for supported distributions, for example:
-- `statix-agent-install-ubuntu-24.04.sh`
-- `statix-agent-update-ubuntu-24.04.sh`
-- `statix-agent-install-archlinux.sh`
-- `statix-agent-update-archlinux.sh`
-- `statix-agent-install-debian.sh`
-- `statix-agent-update-debian.sh`
+Releases are immutable Nix flake revisions published to a signed binary cache.
+Nodes install the exact revision into a Nix profile when commanded by the
+orchestration plane; they never poll, run a timer, consume a mutable `latest`
+URL, or execute a release-provided dependency script.
 
-Installer assets should be published under:
+The installed target is `statix-agent-runtime`, a Nix closure containing the
+agent and its host tools: LXC, QEMU/KVM utilities, networking, nginx, SSH,
+cloud-image tooling, WireGuard, Docker tooling, and supporting utilities.
+
+Install a systemd Linux host with:
 
 ```bash
-https://github.com/StatixSolutions/statix-agent/releases/latest/download
+curl -fsSL https://raw.githubusercontent.com/StatixSolutions/statix-agent/main/installers/install.sh \
+  | sudo STATIX_FLAKE_URL=github:StatixSolutions/statix-agent bash
 ```
 
-Public docs or bootstrap scripts in the `statix` repo should select the correct
-installer asset for the target distribution instead of assuming a universal
-Linux `install.sh` or `update.sh`.
+The installer installs the Nix daemon, creates the agent profile, and installs
+an on-demand update service. An orchestration `update_agent` operation supplies
+an exact release revision. The agent realizes a new generation before
+activation, restarts only the agent control plane, checks health and
+capabilities, and rolls back the profile on failure.
 
-Host migrations are cumulative release assets. New migration scripts go under
-`migrations/` with a unique four-digit prefix and are never renamed or removed
-after release. The updater records the last successful migration in
-`/var/lib/statix-agent/migrations/state.json` and retries pending migrations on
-the next update if one fails.
+Inspect or operate updates with:
 
-The first release containing the migration runner must be installed on existing
-hosts with the platform installer once, because older updater scripts cannot
-execute migrations they do not contain. Subsequent updates apply pending
-migrations automatically.
+```bash
+sudo systemctl start statix-agent-update.service
+```
 
-Agent upgrades are control-plane updates. The service units use
+The old per-distribution installers, updater, dependency installer, and
+migration bundle have been removed. The Nix bootstrap is the only installation
+path.
+
+NixOS hosts should manage `services.statix-agent.package` through their normal
+system flake and `nixos-rebuild`; the on-demand update service is for hosts
+installed through the standalone bootstrap.
+
+Agent upgrades are control-plane updates. The service uses
 `KillMode=process` so long-lived deployed LXC/Docker runtimes and project
 MicroVM processes are not stopped when the agent is restarted. Runtime state is
 kept under the agent state directory so a new agent instance can reconnect to
@@ -60,14 +56,13 @@ traffic remains healthy throughout an update.
 cargo build --release
 ```
 
-For release packaging, use:
+For local Nix evaluation and packaging, use:
 
 ```bash
-bash scripts/build-release.sh all
+nix flake check
+nix build .#statix-agent
+nix build .#statix-agent-capabilities
 ```
-
-This stages structured output under `dist/release/` and writes the flat GitHub
-release asset set under `dist/upload/`.
 
 ## Pull request checks
 

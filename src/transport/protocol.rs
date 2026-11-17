@@ -5,10 +5,9 @@
 //! `plans/controlplane-agent-communicationsystem.md` §2-3). JSON field names
 //! are camelCase to match it exactly.
 //!
-//! Only message types actually exchanged today are modeled. `op_dispatch`,
-//! `op_cancel` and `op_result` are not — node-controller's own gateway
-//! doesn't send or act on them either yet (see `AgentConnection.handleV2`'s
-//! default case, which just logs and no-ops).
+//! The orchestration operation frames are modeled here as well. Updates are
+//! deliberately addressed by an immutable flake revision; channels are a
+//! control-plane concern and never reach the node updater.
 //!
 //! The v1 telemetry and log frames are carried over as agent-defined v2
 //! types that are NOT yet in node-controller-contract (see
@@ -122,7 +121,48 @@ pub enum IncomingMessage {
     Ping,
     Desired(NodeDesiredState),
     LogQuery(LogQueryBody),
+    OpDispatch(OpDispatchBody),
+    OpCancel(OpCancelBody),
     Unhandled(String),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind")]
+pub enum OperationSpec {
+    #[serde(rename = "update_agent")]
+    UpdateAgent(UpdateAgentSpec),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAgentSpec {
+    pub flake_ref: String,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpDispatchBody {
+    pub op_id: Id,
+    pub spec: OperationSpec,
+    pub lease_expires_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpCancelBody {
+    pub op_id: Id,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpResultBody {
+    pub op_id: Id,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// `logs.query` body — the v1 `log_query` fields, camelCase as on the v1 wire.
@@ -175,6 +215,12 @@ pub fn decode(raw: &str) -> Result<IncomingMessage, DecodeError> {
         "logs.query" => serde_json::from_value(envelope.body)
             .map(IncomingMessage::LogQuery)
             .map_err(body_error),
+        "op_dispatch" => Ok(serde_json::from_value(envelope.body)
+            .map(IncomingMessage::OpDispatch)
+            .unwrap_or_else(|_| IncomingMessage::Unhandled(kind))),
+        "op_cancel" => Ok(serde_json::from_value(envelope.body)
+            .map(IncomingMessage::OpCancel)
+            .unwrap_or_else(|_| IncomingMessage::Unhandled(kind))),
         other => Ok(IncomingMessage::Unhandled(other.to_string())),
     }
 }
@@ -680,6 +726,18 @@ mod tests {
             decode(r#"{"v":2,"type":"op_dispatch","id":"1","ts":0,"body":{}}"#).unwrap(),
             IncomingMessage::Unhandled(kind) if kind == "op_dispatch"
         ));
+    }
+
+    #[test]
+    fn decodes_immutable_update_operation() {
+        let message = decode(
+            r#"{"v":2,"type":"op_dispatch","id":"1","ts":0,"body":{"opId":"op1","leaseExpiresAt":"2099-01-01T00:00:00Z","spec":{"kind":"update_agent","flakeRef":"github:example/agent","revision":"abc123"}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(message, IncomingMessage::OpDispatch(body)
+            if body.op_id == "op1"
+                && matches!(body.spec, OperationSpec::UpdateAgent(ref spec)
+                    if spec.revision == "abc123")));
     }
 
     #[test]

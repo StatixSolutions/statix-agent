@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use super::dispatch::{self, HandleOutcome};
 use super::protocol::{self, AuthBody, HelloBody, IncomingMessage, NodeDesiredState};
 use crate::config::{AgentConfig, WireGuardConfig};
-use crate::{metrics, system_info};
+use crate::{metrics, system_info, update};
 
 pub enum SessionOutcome {
     Stopped,
@@ -42,6 +42,7 @@ pub enum OutboundMessage {
     SystemInfo(Box<system_info::SystemInfoPayload>),
     LogResult(protocol::LogResultBody),
     LogCapabilities,
+    OpResult(protocol::OpResultBody),
 }
 
 /// Runs the reconnect loop until `stop_rx` signals shutdown.
@@ -100,6 +101,11 @@ async fn run_once(
 
     info!(websocket_url = %crate::redact_url(&config.agent_ws_url), "connected to server (protocol v2)");
 
+    let pending_results = update::pending_results().unwrap_or_default();
+    let pending_ids = pending_results
+        .iter()
+        .map(|result| result.op_id.clone())
+        .collect();
     send(
         &mut ws,
         "hello",
@@ -109,7 +115,7 @@ async fn run_once(
             boot_id: boot_id.to_string(),
             capabilities: Vec::new(), // honest: no execution capability yet
             observed: Default::default(), // no local desired-state store yet
-            pending_op_results: Vec::new(),
+            pending_op_results: pending_ids,
         },
     )
     .await
@@ -161,6 +167,9 @@ async fn run_once(
         resync_sec = welcome.resync_sec,
         "v2 session established"
     );
+    if let Err(error) = update::mark_ready() {
+        warn!(%error, "failed to write agent readiness marker");
+    }
 
     let (mut ws_write, mut ws_read) = ws.split();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<OutboundMessage>();
@@ -176,6 +185,7 @@ async fn run_once(
                 OutboundMessage::LogCapabilities => {
                     protocol::encode("logs.capabilities", serde_json::json!({}))
                 }
+                OutboundMessage::OpResult(result) => protocol::encode("op_result", result),
             };
             if ws_write.send(Message::Text(payload.into())).await.is_err() {
                 warn!("outbound v2 message send failed");
@@ -183,6 +193,10 @@ async fn run_once(
             }
         }
     });
+
+    for result in pending_results {
+        let _ = outbound_tx.send(OutboundMessage::OpResult(result));
+    }
 
     let mut last_desired: Option<NodeDesiredState> = None;
     let mut resync_tick = interval(Duration::from_secs(u64::from(welcome.resync_sec)));

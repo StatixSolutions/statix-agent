@@ -39,8 +39,8 @@ jobs:
       - name: Run unit tests
         run: cargo test --locked --all-targets
 
-      - name: Test updater transaction and rollback
-        run: sudo bash scripts/test-updater.sh
+      - name: Run updater tests
+        run: cargo test --locked update
 
   runner-integration-tests:
     name: Runner integration tests
