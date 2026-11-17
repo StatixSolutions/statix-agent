@@ -24,3 +24,7 @@ time = { version = "0.3", default-features = false, features = ["std", "formatti
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 ulid = "1.2.1"
+
+[dev-dependencies]
+jsonschema = { version = "0.17.1", default-features = false }
+serde_yaml = "0.9.34"

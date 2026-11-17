@@ -592,6 +592,10 @@ pub struct NodeEvent {
 mod tests {
     use super::*;
 
+    mod openapi_contract {
+        include!("tests/openapi_contract/mod.rs");
+    }
+
     #[test]
     fn decodes_logs_query() {
         let raw = r#"{"v":2,"type":"logs.query","id":"01J","ts":1,"body":{"requestId":"r1","scope":"agent","resourceId":"x","cursor":"c","limit":5}}"#;
