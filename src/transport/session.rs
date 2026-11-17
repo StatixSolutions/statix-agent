@@ -167,6 +167,9 @@ async fn run_once(
         resync_sec = welcome.resync_sec,
         "v2 session established"
     );
+    if let Err(error) = update::mark_ready() {
+        warn!(%error, "failed to write agent readiness marker");
+    }
 
     let (mut ws_write, mut ws_read) = ws.split();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<OutboundMessage>();

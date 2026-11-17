@@ -79,6 +79,7 @@ ExecStart=$PROFILE/bin/statix-agent run
 Environment=STATIX_AGENT_CONFIG=$CONFIG_DIR/agent.json
 Environment=STATIX_AGENT_STATE_DIR=$STATE_DIR
 Environment=HOME=$STATE_DIR
+Environment=PATH=$PROFILE/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin
 Environment=STATIX_LXC_HELPER_PATH=$PROFILE/bin/statix-agent-lxc
 Restart=always
 RestartSec=5s
@@ -93,16 +94,10 @@ ReadWritePaths=$STATE_DIR
 [Install]
 WantedBy=multi-user.target
 EOF
-  cat >/etc/statix/update.conf <<EOF
-STATIX_FLAKE_URL=$(printf '%q' "$FLAKE_URL")
-STATIX_FLAKE_ATTR=$(printf '%q' "$FLAKE_ATTR")
-STATIX_AGENT_PROFILE=$(printf '%q' "$PROFILE")
-STATIX_AGENT_STATE_DIR=$(printf '%q' "$STATE_DIR/update")
-EOF
-  chmod 0640 /etc/statix/update.conf
   cat >/etc/sudoers.d/statix-agent <<EOF
 Defaults!$PROFILE/bin/statix-agent-lxc secure_path="$PROFILE/bin:/usr/bin:/bin"
 $SERVICE_USER ALL=(root) NOPASSWD: $PROFILE/bin/statix-agent-lxc *
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start statix-agent-update.service
 EOF
   chmod 0440 /etc/sudoers.d/statix-agent
   if command -v visudo >/dev/null 2>&1; then
@@ -118,6 +113,8 @@ After=network-online.target
 Type=oneshot
 ExecStart=$PROFILE/bin/statix-agent update-worker
 Environment=STATIX_AGENT_STATE_DIR=$STATE_DIR
+Environment=STATIX_AGENT_PROFILE=$PROFILE
+Environment=PATH=$PROFILE/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin
 User=root
 Group=root
 EOF

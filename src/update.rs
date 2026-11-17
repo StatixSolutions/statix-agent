@@ -3,17 +3,24 @@
 //! The agent owns only the execution of an explicitly addressed update. The
 //! orchestration plane owns rollout timing, targeting, and retry policy.
 
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    fs::File,
+    path::{Path, PathBuf},
+    process::Command,
+    time::{Duration, SystemTime},
+};
 
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 
 use crate::config::agent_state_dir;
 use crate::transport::protocol::{Id, OpResultBody, UpdateAgentSpec, now_rfc3339};
 
-const PROFILE: &str = "/nix/var/nix/profiles/statix-agent";
 const PACKAGE: &str = "statix-agent-runtime";
+const NIX_FEATURES: [&str; 2] = ["--extra-experimental-features", "nix-command flakes"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,7 +44,23 @@ fn operations_dir() -> Result<PathBuf> {
 }
 
 fn operation_path(op_id: &str) -> Result<PathBuf> {
+    let path = Path::new(op_id);
+    if op_id.is_empty()
+        || path.is_absolute()
+        || path.components().count() != 1
+        || path.file_name().and_then(|name| name.to_str()) != Some(op_id)
+    {
+        bail!("invalid operation id");
+    }
     Ok(operations_dir()?.join(format!("{op_id}.json")))
+}
+
+fn operation_lock() -> Result<File> {
+    let path = operations_dir()?.join("operations.lock");
+    let lock = File::create(path).context("failed to create update operation lock")?;
+    lock.lock_exclusive()
+        .context("failed to lock update operations")?;
+    Ok(lock)
 }
 
 fn write_operation(operation: &UpdateOperation) -> Result<()> {
@@ -56,7 +79,9 @@ pub fn load_operation(op_id: &str) -> Result<Option<UpdateOperation>> {
         return Ok(None);
     }
     let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(Some(serde_json::from_slice(&bytes).context("invalid update operation state")?))
+    Ok(Some(
+        serde_json::from_slice(&bytes).context("invalid update operation state")?,
+    ))
 }
 
 pub fn pending_results() -> Result<Vec<OpResultBody>> {
@@ -67,8 +92,20 @@ pub fn pending_results() -> Result<Vec<OpResultBody>> {
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let bytes = fs::read(&path)?;
-        let operation: UpdateOperation = serde_json::from_slice(&bytes)?;
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(?error, path = %path.display(), "skipping unreadable update state");
+                continue;
+            }
+        };
+        let operation: UpdateOperation = match serde_json::from_slice(&bytes) {
+            Ok(operation) => operation,
+            Err(error) => {
+                tracing::warn!(?error, path = %path.display(), "skipping invalid update state");
+                continue;
+            }
+        };
         results.push(OpResultBody {
             op_id: operation.op_id,
             status: operation.status,
@@ -85,6 +122,7 @@ pub fn accept(
     target: UpdateAgentSpec,
     lease_expires_at: String,
 ) -> Result<(UpdateOperation, bool)> {
+    let _lock = operation_lock()?;
     if target.flake_ref.trim().is_empty() || target.revision.trim().is_empty() {
         bail!("update requires an immutable flakeRef and revision");
     }
@@ -113,6 +151,7 @@ pub fn accept(
 }
 
 pub fn set_result(operation: &mut UpdateOperation, result: &OpResultBody) -> Result<()> {
+    let _lock = operation_lock()?;
     operation.status = result.status.clone();
     operation.reason = result.reason.clone();
     operation.message = result.message.clone();
@@ -142,6 +181,7 @@ pub async fn start_worker() -> Result<()> {
 }
 
 pub fn cancel(op_id: &str) -> Result<OpResultBody> {
+    let _lock = operation_lock()?;
     let mut operation = load_operation(op_id)?.context("unknown update operation")?;
     if operation.status == "accepted" {
         let result = OpResultBody {
@@ -163,74 +203,188 @@ pub fn cancel(op_id: &str) -> Result<OpResultBody> {
 }
 
 pub fn run_worker() -> Result<()> {
-    let entries = fs::read_dir(operations_dir()?)?;
-    let mut candidate = None;
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        let operation: UpdateOperation = serde_json::from_slice(&fs::read(path)?)?;
-        if operation.status == "accepted" {
-            candidate = Some(operation);
-            break;
-        }
-    }
-    let mut operation = candidate.context("no accepted update operation")?;
-    operation.status = "running".to_owned();
-    operation.updated_at = now_rfc3339();
-    write_operation(&operation)?;
-
-    let target = &operation.target;
-    let reference = format!("{}?rev={}#{}", target.flake_ref, target.revision, PACKAGE);
-    let install = Command::new("nix")
-        .args(["profile", "install", "--profile", PROFILE, &reference])
-        .output()
-        .context("failed to execute nix profile install")?;
-    if !install.status.success() {
-        let result = OpResultBody {
-            op_id: operation.op_id.clone(),
-            status: "failed".to_owned(),
-            reason: Some("realization_failed".to_owned()),
-            message: Some(String::from_utf8_lossy(&install.stderr).trim().to_owned()),
+    loop {
+        let mut operation = {
+            let _lock = operation_lock()?;
+            let entries = fs::read_dir(operations_dir()?)?;
+            let mut candidate = None;
+            for entry in entries {
+                let path = entry?.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                    continue;
+                }
+                let bytes = match fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::warn!(?error, path = %path.display(), "skipping unreadable update state");
+                        continue;
+                    }
+                };
+                let operation: UpdateOperation = match serde_json::from_slice(&bytes) {
+                    Ok(operation) => operation,
+                    Err(error) => {
+                        tracing::warn!(?error, path = %path.display(), "skipping invalid update state");
+                        continue;
+                    }
+                };
+                if operation.status == "accepted" {
+                    candidate = Some(operation);
+                    break;
+                }
+            }
+            let mut operation = match candidate {
+                Some(operation) => operation,
+                None => return Ok(()),
+            };
+            operation.status = "running".to_owned();
+            operation.updated_at = now_rfc3339();
+            write_operation(&operation)?;
+            operation
         };
-        set_result(&mut operation, &result)?;
-        return Ok(());
-    }
 
-    let restart = Command::new("systemctl")
-        .args(["restart", "statix-agent.service"])
-        .status()
-        .context("failed to restart statix-agent.service")?;
-    let active = Command::new("systemctl")
-        .args(["is-active", "--quiet", "statix-agent.service"])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !restart.success() || !active {
-        let _ = Command::new("nix")
-            .args(["profile", "rollback", "--profile", PROFILE])
-            .status();
-        let _ = Command::new("systemctl")
+        let target = &operation.target;
+        let reference = flake_reference(&target.flake_ref, &target.revision);
+        let ready_before = readiness_stamp();
+        let profile = profile();
+        let mut nix_args = vec![
+            NIX_FEATURES[0],
+            NIX_FEATURES[1],
+            "profile",
+            "install",
+            "--profile",
+            profile.as_str(),
+        ];
+        nix_args.push(&reference);
+        let install = Command::new("nix")
+            .env("PATH", nix_path())
+            .args(nix_args)
+            .output()
+            .context("failed to execute nix profile install")?;
+        if !install.status.success() {
+            let result = OpResultBody {
+                op_id: operation.op_id.clone(),
+                status: "failed".to_owned(),
+                reason: Some("realization_failed".to_owned()),
+                message: Some(String::from_utf8_lossy(&install.stderr).trim().to_owned()),
+            };
+            set_result(&mut operation, &result)?;
+            return Ok(());
+        }
+
+        let restart = Command::new("systemctl")
             .args(["restart", "statix-agent.service"])
-            .status();
+            .status()
+            .context("failed to restart statix-agent.service")?;
+        let active = Command::new("systemctl")
+            .args(["is-active", "--quiet", "statix-agent.service"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        let ready = wait_for_readiness(ready_before, Duration::from_secs(30));
+        if !restart.success() || !active || !ready {
+            let rollback = Command::new("nix")
+                .env("PATH", nix_path())
+                .args([
+                    NIX_FEATURES[0],
+                    NIX_FEATURES[1],
+                    "profile",
+                    "rollback",
+                    "--profile",
+                    profile.as_str(),
+                ])
+                .status()
+                .context("failed to execute nix profile rollback")?;
+            let restore = Command::new("systemctl")
+                .args(["restart", "statix-agent.service"])
+                .status()
+                .context("failed to restart statix-agent.service after rollback")?;
+            let result = OpResultBody {
+                op_id: operation.op_id.clone(),
+                status: "failed".to_owned(),
+                reason: Some(
+                    if !rollback.success() || !restore.success() {
+                        "rollback_failed"
+                    } else {
+                        "health_check_failed"
+                    }
+                    .to_owned(),
+                ),
+                message: Some(if rollback.success() && restore.success() {
+                    "new generation was rolled back".to_owned()
+                } else {
+                    "update failed and rollback could not be confirmed".to_owned()
+                }),
+            };
+            set_result(&mut operation, &result)?;
+            return Ok(());
+        }
+
         let result = OpResultBody {
             op_id: operation.op_id.clone(),
-            status: "failed".to_owned(),
-            reason: Some("health_check_failed".to_owned()),
-            message: Some("new generation was rolled back".to_owned()),
+            status: "succeeded".to_owned(),
+            reason: None,
+            message: Some(format!("activated revision {}", target.revision)),
         };
         set_result(&mut operation, &result)?;
-        return Ok(());
     }
+}
 
-    let result = OpResultBody {
-        op_id: operation.op_id.clone(),
-        status: "succeeded".to_owned(),
-        reason: None,
-        message: Some(format!("activated revision {}", target.revision)),
+fn profile() -> String {
+    std::env::var("STATIX_AGENT_PROFILE")
+        .unwrap_or_else(|_| "/nix/var/nix/profiles/statix-agent".to_owned())
+}
+
+fn nix_path() -> String {
+    let current = std::env::var("PATH").unwrap_or_default();
+    format!("/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin:{current}")
+}
+
+fn flake_reference(flake_ref: &str, revision: &str) -> String {
+    let (without_fragment, fragment) = flake_ref
+        .split_once('#')
+        .map_or((flake_ref, None), |(base, fragment)| (base, Some(fragment)));
+    let separator = if without_fragment.contains('?') {
+        '&'
+    } else {
+        '?'
     };
-    set_result(&mut operation, &result)
+    let mut reference = format!("{without_fragment}{separator}rev={revision}#{}", PACKAGE);
+    if let Some(fragment) = fragment.filter(|fragment| !fragment.is_empty()) {
+        reference = format!("{without_fragment}{separator}rev={revision}#{fragment}");
+    }
+    reference
+}
+
+fn readiness_stamp() -> Option<SystemTime> {
+    fs::metadata(readiness_path())
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+fn readiness_path() -> PathBuf {
+    agent_state_dir()
+        .map(|dir| dir.join("ready"))
+        .unwrap_or_else(|_| PathBuf::from("/run/statix-agent-ready"))
+}
+
+pub fn mark_ready() -> Result<()> {
+    let path = readiness_path();
+    fs::write(&path, now_rfc3339())
+        .with_context(|| format!("failed to write readiness marker {}", path.display()))
+}
+
+fn wait_for_readiness(previous: Option<SystemTime>, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Ok(modified) =
+            fs::metadata(readiness_path()).and_then(|metadata| metadata.modified())
+        {
+            if previous.map(|old| modified > old).unwrap_or(true) {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    false
 }
 
 #[cfg(test)]

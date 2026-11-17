@@ -47,7 +47,9 @@ if [[ "${1:-table}" == "--json" ]]; then
   while IFS=$'\t' read -r name status detail; do
     (( first )) || printf ','
     first=0
-    printf '{"name":"%s","status":"%s","detail":"%s"}' "$name" "$status" "${detail//"/\\\"}"
+    detail_json=${detail//\\/\\\\}
+    detail_json=${detail_json//"/\\"}
+    printf '{"name":"%s","status":"%s","detail":"%s"}' "$name" "$status" "$detail_json"
   done < <(probe)
   printf ']}\n'
 else

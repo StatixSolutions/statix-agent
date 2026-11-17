@@ -3,6 +3,7 @@ FROM rust:bookworm AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY contracts ./contracts
 RUN cargo test --locked --bin statix-agent --no-run \
     && find target/debug/deps -maxdepth 1 -type f -name 'statix_agent-*' -perm -111 -exec cp {} /runner-tests \; \
     && test -x /runner-tests
