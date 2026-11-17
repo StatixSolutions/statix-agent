@@ -72,6 +72,17 @@ jobs:
           GIT_SHA: ${{ github.sha }}
         run: bash scripts/build-release.sh shared
 
+      - name: Remove stale release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' |
+              while IFS= read -r asset; do
+                [ -n "$asset" ] && gh release delete-asset "$GITHUB_REF_NAME" "$asset" --yes
+              done
+          fi
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
