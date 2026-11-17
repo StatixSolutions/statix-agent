@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cloud-image-utils dnsmasq gawk iproute2 iptables lxc lxc-templates openssh-client procps qemu-system-x86 qemu-utils sudo util-linux wget xz-utils \
     ca-certificates git systemd systemd-sysv \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin statix-agent \
+    && (getent group kvm >/dev/null || groupadd --system --gid 108 kvm) \
+    && useradd --system --user-group --groups kvm --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin statix-agent \
     && mkdir -p /etc/statix /opt/statix \
     && systemctl disable lxc-net.service dnsmasq.service
 
