@@ -685,7 +685,7 @@ async fn wait_for_guest_ready(
 
         let elapsed = start.elapsed();
         if elapsed >= next_progress_log {
-            debug!(elapsed_seconds = elapsed.as_secs(), last_probe_failure = %last_probe_failure, "waiting for microvm guest readiness");
+            info!(elapsed_seconds = elapsed.as_secs(), last_probe_failure = %last_probe_failure, "waiting for microvm guest readiness");
             next_progress_log += Duration::from_secs(15);
         }
 
@@ -713,7 +713,7 @@ async fn wait_for_project_guest_ready(
 
         let elapsed = start.elapsed();
         if elapsed >= next_progress_log {
-            debug!(
+            info!(
                 elapsed_seconds = elapsed.as_secs(),
                 "waiting for project microvm guest readiness"
             );
