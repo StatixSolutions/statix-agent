@@ -14,14 +14,17 @@ case "$mode" in
     link="$out/.statix-agent-${arch}-linux"
     nix build --print-build-logs ".#packages.${system}.statix-agent-runtime" \
       --out-link "$link"
-    tar -C "$(readlink -f "$link")" -czf "$out/statix-agent-${arch}-linux.tar.gz" .
+    # symlinkJoin exposes the runtime through links into /nix/store. Dereference
+    # them while archiving so the published artifact does not contain links to
+    # the builder's private store paths.
+    tar -h -C "$(readlink -f "$link")" -czf "$out/statix-agent-${arch}-linux.tar.gz" .
     rm -f "$link"
     ;;
   shared)
     link="$out/.capabilities"
     nix build --print-build-logs .#packages.x86_64-linux.statix-agent-capabilities \
       --out-link "$link"
-    tar -C "$(readlink -f "$link")" -czf "$out/statix-agent-capabilities.tar.gz" .
+    tar -h -C "$(readlink -f "$link")" -czf "$out/statix-agent-capabilities.tar.gz" .
     rm -f "$link"
     ;;
   *)

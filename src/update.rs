@@ -11,13 +11,13 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 
 use crate::config::agent_state_dir;
-use crate::transport::protocol::{Id, OpResultBody, UpdateAgentSpec, now_rfc3339};
+use crate::transport::protocol::{now_rfc3339, Id, OpResultBody, UpdateAgentSpec};
 
 const PACKAGE: &str = "statix-agent-runtime";
 const NIX_FEATURES: [&str; 2] = ["--extra-experimental-features", "nix-command flakes"];
@@ -190,7 +190,11 @@ pub fn cancel(op_id: &str) -> Result<OpResultBody> {
             reason: Some("cancelled".to_owned()),
             message: Some("update cancelled before activation".to_owned()),
         };
-        set_result(&mut operation, &result)?;
+        operation.status = result.status.clone();
+        operation.reason = result.reason.clone();
+        operation.message = result.message.clone();
+        operation.updated_at = now_rfc3339();
+        write_operation(&operation)?;
         Ok(result)
     } else {
         Ok(OpResultBody {
@@ -246,6 +250,16 @@ pub fn run_worker() -> Result<()> {
         let reference = flake_reference(&target.flake_ref, &target.revision);
         let ready_before = readiness_stamp();
         let profile = profile();
+        if lease_expired(&operation.lease_expires_at) {
+            let result = OpResultBody {
+                op_id: operation.op_id.clone(),
+                status: "failed".to_owned(),
+                reason: Some("lease_expired".to_owned()),
+                message: Some("update lease expired before realization".to_owned()),
+            };
+            set_result(&mut operation, &result)?;
+            return Ok(());
+        }
         let mut nix_args = vec![
             NIX_FEATURES[0],
             NIX_FEATURES[1],
@@ -266,6 +280,41 @@ pub fn run_worker() -> Result<()> {
                 status: "failed".to_owned(),
                 reason: Some("realization_failed".to_owned()),
                 message: Some(String::from_utf8_lossy(&install.stderr).trim().to_owned()),
+            };
+            set_result(&mut operation, &result)?;
+            return Ok(());
+        }
+
+        if lease_expired(&operation.lease_expires_at) {
+            let rollback = Command::new("nix")
+                .env("PATH", nix_path())
+                .args([
+                    NIX_FEATURES[0],
+                    NIX_FEATURES[1],
+                    "profile",
+                    "rollback",
+                    "--profile",
+                    profile.as_str(),
+                ])
+                .status()
+                .context("failed to execute nix profile rollback")?;
+            let result = OpResultBody {
+                op_id: operation.op_id.clone(),
+                status: "failed".to_owned(),
+                reason: Some(
+                    if rollback.success() {
+                        "lease_expired"
+                    } else {
+                        "rollback_failed"
+                    }
+                    .to_owned(),
+                ),
+                message: Some(if rollback.success() {
+                    "update lease expired before activation; new generation was rolled back"
+                        .to_owned()
+                } else {
+                    "update lease expired and rollback could not be confirmed".to_owned()
+                }),
             };
             set_result(&mut operation, &result)?;
             return Ok(());
@@ -355,6 +404,12 @@ fn flake_reference(flake_ref: &str, revision: &str) -> String {
     reference
 }
 
+fn lease_expired(value: &str) -> bool {
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .map(|expires| expires <= time::OffsetDateTime::now_utc())
+        .unwrap_or(true)
+}
+
 fn readiness_stamp() -> Option<SystemTime> {
     fs::metadata(readiness_path())
         .and_then(|metadata| metadata.modified())
@@ -402,5 +457,12 @@ mod tests {
             "2099-01-01T00:00:00Z".to_owned(),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn expired_leases_are_rejected() {
+        assert!(lease_expired("2000-01-01T00:00:00Z"));
+        assert!(lease_expired("not-a-timestamp"));
+        assert!(!lease_expired("2099-01-01T00:00:00Z"));
     }
 }
