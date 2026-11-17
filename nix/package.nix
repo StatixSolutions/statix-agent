@@ -29,6 +29,11 @@ rustPlatform.buildRustPackage {
     openssl
   ];
 
+  postInstall = ''
+    install -Dm0755 installers/common/statix-agent-capabilities.sh \
+      $out/bin/statix-agent-capabilities
+  '';
+
   meta = {
     description = "Statix node agent";
     homepage = "https://statix.se";

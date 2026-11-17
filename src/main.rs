@@ -6,6 +6,7 @@ mod logs;
 mod metrics;
 mod system_info;
 mod transport;
+mod update;
 mod wireguard;
 
 use anyhow::{Context, Result, bail};
@@ -36,6 +37,8 @@ enum Command {
     Run(RunArgs),
     Login(LoginArgs),
     Update,
+    #[command(name = "update-worker", hide = true)]
+    UpdateWorker,
 }
 
 #[derive(Debug, Args, Default)]
@@ -106,6 +109,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             run_login(login_config, options).await
         }
         Some(Command::Update) => request_update().await,
+        Some(Command::UpdateWorker) => update::run_worker(),
     }
 }
 

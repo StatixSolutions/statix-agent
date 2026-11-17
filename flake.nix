@@ -18,6 +18,11 @@
         in
         {
           statix-agent = pkgs.callPackage ./nix/package.nix {};
+          statix-agent-capabilities = pkgs.writeShellApplication {
+            name = "statix-agent-capabilities";
+            runtimeInputs = [ pkgs.bash pkgs.coreutils ];
+            text = builtins.readFile ./installers/common/statix-agent-capabilities.sh;
+          };
           default = self.packages.${system}.statix-agent;
         });
 

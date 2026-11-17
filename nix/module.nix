@@ -9,6 +9,11 @@ let
   cfg = config.services.statix-agent;
   json = pkgs.formats.json {};
   defaultPackage = pkgs.callPackage ./package.nix {};
+  capabilityPackage = pkgs.writeShellApplication {
+    name = "statix-agent-capabilities";
+    runtimeInputs = [ pkgs.bash pkgs.coreutils ];
+    text = builtins.readFile ../installers/common/statix-agent-capabilities.sh;
+  };
   generatedConfig = json.generate "statix-agent.json" cfg.settings;
   microvmRuntimeDeps = [
     pkgs.cloud-utils
@@ -115,6 +120,7 @@ in
 
     environment.systemPackages = [
       cfg.package
+      capabilityPackage
     ]
     ++ lib.optionals cfg.microvm.enable microvmRuntimeDeps
     ++ lxcRuntimeDeps
@@ -183,5 +189,6 @@ in
         ExecStartPre = "+${microvmPreStartScript}";
       };
     };
+
   };
 }

@@ -111,20 +111,20 @@ const IMPLEMENTATIONS: &[Implementation] = &[
     Implementation {
         kind: "op_dispatch",
         direction: Direction::ServerToAgent,
-        implemented: false,
-        tested: false,
+        implemented: true,
+        tested: true,
     },
     Implementation {
         kind: "op_cancel",
         direction: Direction::ServerToAgent,
-        implemented: false,
-        tested: false,
+        implemented: true,
+        tested: true,
     },
     Implementation {
         kind: "op_result",
         direction: Direction::AgentToServer,
-        implemented: false,
-        tested: false,
+        implemented: true,
+        tested: true,
     },
     Implementation {
         kind: "logs.subscribe",

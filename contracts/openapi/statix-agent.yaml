@@ -513,12 +513,13 @@ components:
         message: { type: string }
         at: { $ref: '#/components/schemas/Timestamp' }
     OperationSpec:
-      oneOf:
-        - { type: object, required: [kind], properties: { kind: { const: update_agent }, targetVersion: { type: string }, channel: { type: string } } }
-        - { type: object, required: [kind, workloadId, service], properties: { kind: { const: restart_service }, workloadId: { $ref: '#/components/schemas/Id' }, service: { type: string, minLength: 1 } } }
-        - { type: object, required: [kind, source, args], properties: { kind: { const: run_test }, source: { type: object, required: [repoUrl, ref, commitSha], properties: { repoUrl: { type: string, format: uri }, ref: { type: string }, commitSha: { type: string }, subdir: { type: string } } }, args: { type: array, items: { type: string } }, timeoutSec: { type: integer, minimum: 1, maximum: 3600 } } }
-        - { type: object, required: [kind], properties: { kind: { const: collect_diagnostics }, objectId: { $ref: '#/components/schemas/Id' } } }
-      discriminator: { propertyName: kind }
+      type: object
+      required: [kind, flakeRef, revision, package]
+      properties:
+        kind: { const: update_agent }
+        flakeRef: { type: string, minLength: 1 }
+        revision: { type: string, minLength: 1 }
+        package: { type: string, minLength: 1 }
     OpDispatchBody:
       type: object
       required: [opId, spec, leaseExpiresAt]

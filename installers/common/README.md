@@ -1,9 +1,10 @@
 # Installer support assets
 
-`statix-agent-dependencies.sh` is published with each release and installed by
-the distro-specific installer. The updater downloads the same asset before
-replacing the agent binary, so dependency installation and validation have one
-source of truth.
+The standalone bootstrap installs Nix and the on-demand update service. Agent
+dependencies are delivered through the pinned flake and trusted Nix binary
+cache. The orchestration plane sends an immutable update operation; the Rust
+update worker realizes and health-checks that generation before activation and
+rolls back on failure.
 
-The updater also downloads the cumulative host-migration bundle, verifies its
-checksum, and applies pending migrations before replacing the agent binary.
+The older distro-specific shell assets are retained only for migration and are
+not used by the new update path.

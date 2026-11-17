@@ -1,10 +1,8 @@
 //! Handles one decoded v2 message. `desired` triggers `reconcile::plan` and
 //! queues the resulting status(es) + event; `ping` replies `pong`; `goaway`
 //! tells the session to reconnect after the server's requested delay;
-//! `logs.query` is answered from the local log spool;
-//! anything else (`op_dispatch`/`op_cancel`) is logged and dropped —
-//! mirroring node-controller's own gateway, whose `handleV2` default case
-//! does the same for frames *from* the agent it doesn't handle yet.
+//! `logs.query` is answered from the local log spool; orchestration operations
+//! are accepted only for durable agent updates.
 
 use std::time::Duration;
 
@@ -12,8 +10,11 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::logs;
+use crate::update;
 
-use super::protocol::{IncomingMessage, LogQueryBody, LogResultBody, NodeDesiredState};
+use super::protocol::{
+    IncomingMessage, LogQueryBody, LogResultBody, NodeDesiredState, OpResultBody, OperationSpec,
+};
 use super::reconcile::{self, ReconcilePlan};
 use super::session::OutboundMessage;
 
@@ -49,6 +50,26 @@ pub fn handle(
             spawn_log_query(query, outbound_tx.clone());
             HandleOutcome::Continue
         }
+        IncomingMessage::OpDispatch(dispatch) => {
+            spawn_operation(dispatch, outbound_tx.clone());
+            HandleOutcome::Continue
+        }
+        IncomingMessage::OpCancel(cancel) => {
+            match update::cancel(&cancel.op_id) {
+                Ok(result) => {
+                    let _ = outbound_tx.send(OutboundMessage::OpResult(result));
+                }
+                Err(error) => {
+                    let _ = outbound_tx.send(OutboundMessage::OpResult(OpResultBody {
+                        op_id: cancel.op_id,
+                        status: "rejected".to_owned(),
+                        reason: Some("unknown_operation".to_owned()),
+                        message: Some(error.to_string()),
+                    }));
+                }
+            }
+            HandleOutcome::Continue
+        }
         IncomingMessage::Unhandled(kind) => {
             info!(kind = %kind, "received v2 message not handled this phase");
             HandleOutcome::Continue
@@ -62,6 +83,59 @@ pub fn handle(
             HandleOutcome::Continue
         }
     }
+}
+
+fn spawn_operation(
+    dispatch: super::protocol::OpDispatchBody,
+    outbound_tx: mpsc::UnboundedSender<OutboundMessage>,
+) {
+    let (operation, created) = match dispatch.spec {
+        OperationSpec::UpdateAgent(target) => {
+            match update::accept(&dispatch.op_id, target, dispatch.lease_expires_at) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    let _ = outbound_tx.send(OutboundMessage::OpResult(OpResultBody {
+                        op_id: dispatch.op_id,
+                        status: "rejected".to_owned(),
+                        reason: Some("invalid_update".to_owned()),
+                        message: Some(error.to_string()),
+                    }));
+                    return;
+                }
+            }
+        }
+    };
+
+    let _ = outbound_tx.send(OutboundMessage::OpResult(OpResultBody {
+        op_id: operation.op_id.clone(),
+        status: operation.status.clone(),
+        reason: None,
+        message: Some("update accepted".to_owned()),
+    }));
+    if !created {
+        return;
+    }
+    tokio::spawn(async move {
+        if let Err(error) = update::start_worker().await {
+            if let Ok(Some(mut operation)) = update::load_operation(&operation.op_id) {
+                let result = OpResultBody {
+                    op_id: operation.op_id.clone(),
+                    status: "failed".to_owned(),
+                    reason: Some("worker_start_failed".to_owned()),
+                    message: Some(error.to_string()),
+                };
+                let _ = update::set_result(&mut operation, &result);
+                let _ = outbound_tx.send(OutboundMessage::OpResult(result));
+            }
+        } else if let Ok(Some(operation)) = update::load_operation(&operation.op_id) {
+            let _ = outbound_tx.send(OutboundMessage::OpResult(OpResultBody {
+                op_id: operation.op_id,
+                status: operation.status,
+                reason: operation.reason,
+                message: operation.message,
+            }));
+        }
+    });
 }
 
 fn apply_desired(
