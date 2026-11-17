@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
+    sync::Once,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,6 +25,16 @@ fn test_root(name: &str) -> PathBuf {
 }
 
 const TEST_IMAGE: &str = "ghcr.io/statixsolutions/statix-agent/testing-images/8080-ok:latest";
+
+fn init_test_logging() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+    });
+}
 
 fn compose_command() -> CommandSpec {
     CommandSpec {
@@ -49,6 +60,7 @@ fn workspace(name: &str) -> (PathBuf, PreparedWorkspace) {
 }
 
 fn configure_state(name: &str) -> PathBuf {
+    init_test_logging();
     if std::env::var_os("STATIX_RUNNER_TEST_SYSTEMD").is_some() {
         assert!(
             std::env::var_os("INVOCATION_ID").is_some(),
