@@ -52,6 +52,22 @@ Inspect or operate updates with:
 sudo systemctl start statix-agent-update.service
 ```
 
+If an older agent reports a Nix profile collision while updating, replace the
+existing runtime profile entry and retry the pinned revision. If installation
+fails after removal, restore the previous profile generation before restarting
+the service:
+
+```bash
+PROFILE=/nix/var/nix/profiles/statix-agent
+REVISION=a531330518d9f97fbd568984aab85fa6cb361480
+nix profile list --profile "$PROFILE"
+nix profile remove --profile "$PROFILE" statix-agent-runtime
+nix profile install --profile "$PROFILE" \
+  "github:StatixSolutions/statix-agent?rev=$REVISION#statix-agent-runtime" \
+  || nix profile rollback --profile "$PROFILE"
+systemctl restart statix-agent.service
+```
+
 The old per-distribution installers, updater, dependency installer, and
 migration bundle have been removed. The Nix bootstrap is the only installation
 path.

@@ -348,20 +348,7 @@ async fn run_target(mut operation: Option<UpdateOperation>, target: UpdateAgentS
     }
 
     tracing::info!("realizing agent profile generation");
-    let install = Command::new("nix")
-        .env("PATH", nix_path())
-        .args([
-            NIX_FEATURES[0],
-            NIX_FEATURES[1],
-            "profile",
-            "install",
-            "--profile",
-            profile.as_str(),
-            &reference,
-        ])
-        .status()
-        .context("failed to execute nix profile install")?;
-    if !install.success() {
+    if !replace_profile_generation(&profile, &reference)? {
         tracing::error!("agent profile realization failed");
         return finish_operation(
             &mut operation,
@@ -463,6 +450,92 @@ async fn run_target(mut operation: Option<UpdateOperation>, target: UpdateAgentS
             message: Some(format!("activated revision {}", target.revision)),
         },
     )
+}
+
+fn replace_profile_generation(profile: &str, reference: &str) -> Result<bool> {
+    let had_existing_runtime = profile_contains_package(profile, PACKAGE)?;
+    if had_existing_runtime {
+        let removed = Command::new("nix")
+            .env("PATH", nix_path())
+            .args([
+                NIX_FEATURES[0],
+                NIX_FEATURES[1],
+                "profile",
+                "remove",
+                "--profile",
+                profile,
+                PACKAGE,
+            ])
+            .status()
+            .context("failed to remove the previous agent profile entry")?;
+        if !removed.success() {
+            bail!("failed to remove the previous agent profile entry");
+        }
+    }
+
+    let installed = Command::new("nix")
+        .env("PATH", nix_path())
+        .args([
+            NIX_FEATURES[0],
+            NIX_FEATURES[1],
+            "profile",
+            "install",
+            "--profile",
+            profile,
+            reference,
+        ])
+        .status()
+        .context("failed to execute nix profile install")?;
+    if installed.success() {
+        return Ok(true);
+    }
+
+    if had_existing_runtime && !rollback_profile(profile)? {
+        bail!("agent profile installation failed and rollback could not be confirmed");
+    }
+    Ok(false)
+}
+
+fn profile_contains_package(profile: &str, package: &str) -> Result<bool> {
+    if !Path::new(profile).exists() {
+        return Ok(false);
+    }
+
+    let output = Command::new("nix")
+        .env("PATH", nix_path())
+        .args([
+            NIX_FEATURES[0],
+            NIX_FEATURES[1],
+            "profile",
+            "list",
+            "--profile",
+            profile,
+            "--json",
+        ])
+        .output()
+        .context("failed to inspect the agent profile")?;
+    if !output.status.success() {
+        bail!("failed to inspect the agent profile");
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("invalid Nix profile listing")?;
+    Ok(json_contains_package(&value, package))
+}
+
+fn json_contains_package(value: &serde_json::Value, package: &str) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_package(value, package)),
+        serde_json::Value::Object(values) => {
+            values.get("name").and_then(serde_json::Value::as_str) == Some(package)
+                || values
+                    .values()
+                    .any(|value| json_contains_package(value, package))
+        }
+        _ => false,
+    }
 }
 
 fn rollback_profile(profile: &str) -> Result<bool> {
@@ -582,5 +655,27 @@ mod tests {
         assert!(lease_expired("2000-01-01T00:00:00Z"));
         assert!(lease_expired("not-a-timestamp"));
         assert!(!lease_expired("2099-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn finds_runtime_package_in_nix_profile_json() {
+        let listing = serde_json::json!({
+            "elements": [{
+                "name": "statix-agent-runtime",
+                "storePaths": ["/nix/store/example"]
+            }]
+        });
+
+        assert!(json_contains_package(&listing, PACKAGE));
+    }
+
+    #[test]
+    fn does_not_match_other_profile_packages() {
+        let listing = serde_json::json!([
+            {"name": "statix-agent"},
+            {"name": "curl"}
+        ]);
+
+        assert!(!json_contains_package(&listing, PACKAGE));
     }
 }
