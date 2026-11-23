@@ -7,7 +7,7 @@
 
 rustPlatform.buildRustPackage {
   pname = "statix-agent";
-  version = "0.1.0";
+  version = (builtins.fromJSON (builtins.readFile ../version.json)).version;
 
   src = lib.cleanSourceWith {
     src = ./..;
@@ -30,6 +30,7 @@ rustPlatform.buildRustPackage {
   ];
 
   postInstall = ''
+    install -Dm0644 version.json $out/bin/version.json
     install -Dm0755 installers/common/statix-agent-capabilities.sh \
       $out/bin/statix-agent-capabilities
     install -Dm0755 installers/common/statix-agent-lxc-helper \

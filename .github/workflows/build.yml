@@ -36,6 +36,8 @@ jobs:
         env:
           NIX_SYSTEM: ${{ matrix.nix_system }}
           ASSET_ARCH: ${{ matrix.asset_arch }}
+          GIT_TAG: ${{ github.ref_name }}
+          GIT_SHA: ${{ github.sha }}
         run: bash scripts/build-release.sh binary
 
       - name: Package release assets
