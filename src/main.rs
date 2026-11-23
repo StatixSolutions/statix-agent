@@ -109,7 +109,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             run_login(login_config, options).await
         }
         Some(Command::Update) => request_update().await,
-        Some(Command::UpdateWorker) => update::run_worker(),
+        Some(Command::UpdateWorker) => update::run_worker().await,
     }
 }
 
@@ -232,11 +232,11 @@ fn start_update_log_stream() -> Option<Child> {
 
         match TokioCommand::new("journalctl")
             .args([
-                "--follow",
                 "--unit",
                 service.as_str(),
-                "--since",
-                "now",
+                "--follow",
+                "--lines=0",
+                "--output=cat",
                 "--no-pager",
             ])
             .spawn()
