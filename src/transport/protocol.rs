@@ -255,8 +255,12 @@ pub struct ConsoleErrorBody {
     pub message: String,
 }
 
-fn default_console_cols() -> u16 { 80 }
-fn default_console_rows() -> u16 { 24 }
+fn default_console_cols() -> u16 {
+    80
+}
+fn default_console_rows() -> u16 {
+    24
+}
 
 pub fn decode(raw: &str) -> Result<IncomingMessage, DecodeError> {
     let envelope: IncomingEnvelope =
@@ -429,8 +433,12 @@ pub struct ConsoleTarget {
     pub known_hosts_file: Option<String>,
 }
 
-fn default_ssh_port() -> u16 { 22 }
-fn default_ssh_user() -> String { "statix".to_string() }
+fn default_ssh_port() -> u16 {
+    22
+}
+fn default_ssh_user() -> String {
+    "statix".to_string()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

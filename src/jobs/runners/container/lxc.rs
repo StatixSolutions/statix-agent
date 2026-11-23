@@ -17,8 +17,8 @@ use tracing::{debug, info, warn};
 use crate::{
     config::agent_state_dir,
     jobs::{
-    CommandSpec, ExecutionContext, JobExecutionResult, JobLogStream, PreparedWorkspace,
-    summarize_command_output,
+        CommandSpec, ExecutionContext, JobExecutionResult, JobLogStream, PreparedWorkspace,
+        summarize_command_output,
     },
 };
 
@@ -40,6 +40,13 @@ pub(crate) struct LxcContainer {
 }
 
 impl LxcContainer {
+    pub(crate) fn existing(name: String) -> Self {
+        Self {
+            name,
+            destroyed: false,
+        }
+    }
+
     fn check_dependencies() -> Result<()> {
         let required_cmds = [
             "sudo",
@@ -262,6 +269,33 @@ impl LxcContainer {
             );
         }
         debug!(container = %self.name, resolvers = %dns_config.display_nameservers(), "configured guest DNS resolvers");
+        Ok(())
+    }
+
+    pub(crate) async fn provision_ssh(
+        &self,
+        user: &str,
+        public_key: &str,
+        timeout_seconds: u64,
+    ) -> Result<()> {
+        if !user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            || user.is_empty()
+        {
+            bail!("invalid SSH user name");
+        }
+        let command = format!(
+            "set -e; if ! command -v sshd >/dev/null 2>&1; then command -v apt-get >/dev/null 2>&1 || (echo 'openssh-server requires apt-get' >&2; exit 1); DEBIAN_FRONTEND=noninteractive apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server; fi; id {user} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash {user}; install -d -m 700 -o {user} -g {user} /home/{user}/.ssh; printf '%s\\n' {key} > /home/{user}/.ssh/authorized_keys; chown {user}:{user} /home/{user}/.ssh/authorized_keys; chmod 600 /home/{user}/.ssh/authorized_keys; mkdir -p /run/sshd; /usr/sbin/sshd -t; systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || /usr/sbin/sshd",
+            key = shell_escape(public_key),
+        );
+        let output = self.attach_output(timeout_seconds, &command, None).await?;
+        if !output.status.success() {
+            bail!(
+                "SSH provisioning failed: {}",
+                summarize_raw_command_output(&output.stdout, &output.stderr)
+            );
+        }
         Ok(())
     }
 
@@ -544,10 +578,13 @@ impl LxcContainer {
             .arg(lxc_storage_path())
             .status()
             .await;
-        let destroy_status = destroy_status
-            .with_context(|| missing_dependency_message("lxc-destroy", "lxc"))?;
+        let destroy_status =
+            destroy_status.with_context(|| missing_dependency_message("lxc-destroy", "lxc"))?;
         if !destroy_status.success() {
-            bail!("lxc-destroy failed for container {} with {destroy_status}", self.name);
+            bail!(
+                "lxc-destroy failed for container {} with {destroy_status}",
+                self.name
+            );
         }
         self.destroyed = true;
         Ok(())
@@ -588,7 +625,11 @@ impl LxcContainer {
 pub(crate) fn force_destroy(name: &str) {
     for (program, extra) in [("lxc-stop", Some("--kill")), ("lxc-destroy", None)] {
         let mut command = lxc_std_command(program);
-        command.arg("-n").arg(name).arg("-P").arg(lxc_storage_path());
+        command
+            .arg("-n")
+            .arg(name)
+            .arg("-P")
+            .arg(lxc_storage_path());
         if let Some(extra) = extra {
             command.arg(extra);
         }
@@ -733,9 +774,8 @@ fn lxc_std_command(program: &str) -> StdCommand {
 }
 
 fn lxc_helper_path() -> String {
-    std::env::var("STATIX_LXC_HELPER_PATH").unwrap_or_else(|_| {
-        "/nix/var/nix/profiles/statix-agent/bin/statix-agent-lxc".to_owned()
-    })
+    std::env::var("STATIX_LXC_HELPER_PATH")
+        .unwrap_or_else(|_| "/nix/var/nix/profiles/statix-agent/bin/statix-agent-lxc".to_owned())
 }
 
 fn lxc_process_home() -> Option<PathBuf> {
@@ -753,6 +793,20 @@ fn lxc_storage_path() -> PathBuf {
 
 pub(crate) fn runtime_config_path(name: &str) -> PathBuf {
     lxc_storage_path().join(name).join("config")
+}
+
+pub(crate) fn runtime_names() -> Vec<String> {
+    let Ok(entries) = fs::read_dir(lxc_storage_path()) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            (file_type.is_dir() && name.starts_with("statix-runtime-")).then_some(name)
+        })
+        .collect()
 }
 
 pub(crate) fn runtime_log_path(name: &str) -> PathBuf {

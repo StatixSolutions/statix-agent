@@ -1,12 +1,12 @@
 use anyhow::{Result, bail};
 
-pub(super) struct LxcImage {
-    pub(super) distribution: String,
-    pub(super) release: String,
+pub(crate) struct LxcImage {
+    pub(crate) distribution: String,
+    pub(crate) release: String,
 }
 
 impl LxcImage {
-    pub(super) fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             bail!("container image must not be empty");

@@ -177,6 +177,7 @@ async fn run_once(
 
     let (mut ws_write, mut ws_read) = ws.split();
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<OutboundMessage>();
+    let runtime_controller = super::runtime::RuntimeController::default();
     tokio::spawn(async move {
         while let Some(message) = outbound_rx.recv().await {
             let payload = match message {
@@ -241,7 +242,7 @@ async fn run_once(
             incoming = ws_read.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
                     match protocol::decode(&text) {
-                        Ok(message) => match dispatch::handle(message, &outbound_tx, &mut last_desired, &console_manager) {
+                        Ok(message) => match dispatch::handle(message, &outbound_tx, &mut last_desired, &console_manager, &runtime_controller) {
                             HandleOutcome::Continue => {}
                             HandleOutcome::Reconnect { after } => {
                                 return Ok(SessionOutcome::Reconnect { after });
@@ -290,7 +291,7 @@ async fn run_once(
             }
             _ = resync_tick.tick() => {
                 if let Some(desired) = &last_desired {
-                    dispatch::resync(desired, &outbound_tx);
+                    dispatch::resync(desired, &outbound_tx, &runtime_controller);
                 }
             }
             changed = stop_rx.changed() => {

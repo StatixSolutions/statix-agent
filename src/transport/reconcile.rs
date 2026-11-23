@@ -1,21 +1,14 @@
 //! The "verify current against target" step: given a [`NodeDesiredState`],
-//! produce the [`ObjectStatus`] reports and a human-readable log block. Pure
-//! and side-effect free — no docker/lxc calls.
+//! produce the [`ObjectStatus`] reports and a human-readable log block.
 //!
-//! Real execution (and therefore real observation of what's actually
-//! running) is still disconnected: job execution is not wired up
-//! yet. So every object here is reported honestly as
-//! `Pending` with an `Unsupported` condition, rather than claiming anything
-//! ran — the protocol-correct way to say "I understood this spec, I'm just
-//! not acting on it yet" (see `Reason::Unsupported` in
-//! node-controller-contract: "agent lacks the capability for this spec").
+//! Runtime execution is performed by [`super::runtime::RuntimeController`].
 
 use super::protocol::{
     Condition, ConditionStatus, EventSeverity, NodeDesiredState, NodeEvent, ObjectKind,
     ObjectStatus, Phase, RuntimeSpec, WorkloadSpec, new_id, now_rfc3339,
 };
 
-const UNSUPPORTED_MESSAGE: &str = "execution not yet implemented in this build";
+const UNSUPPORTED_MESSAGE: &str = "execution not supported by this runtime type";
 
 pub struct ReconcilePlan {
     pub statuses: Vec<ObjectStatus>,
@@ -58,7 +51,7 @@ pub fn plan(state: &NodeDesiredState) -> ReconcilePlan {
         severity: EventSeverity::Info,
         reason: "DesiredStateReceived".to_string(),
         message: format!(
-            "generation {}: {} runtime(s), {} workload(s), none executed (not yet implemented)",
+            "generation {}: {} runtime(s), {} workload(s)",
             state.generation,
             state.runtimes.len(),
             state.workloads.len()
@@ -94,19 +87,17 @@ fn pending_status(kind: ObjectKind, id: &str, node_id: &str, generation: u64) ->
 }
 
 fn runtime_status(runtime: &RuntimeSpec) -> ObjectStatus {
-    let ready = matches!(runtime.spec.power, super::protocol::PowerState::Running)
-        && runtime.spec.console.is_some();
     ObjectStatus {
         id: runtime.meta.id.clone(),
         kind: ObjectKind::Runtime,
         node_id: runtime.meta.node_id.clone(),
         observed_generation: runtime.meta.generation,
-        phase: if ready { Phase::Ready } else { Phase::Pending },
+        phase: Phase::Progressing,
         conditions: vec![Condition {
-            condition_type: "SSHConsole".to_string(),
-            status: if ready { ConditionStatus::True } else { ConditionStatus::False },
-            reason: Some(if ready { "Available" } else { "RuntimeNotReady" }.to_string()),
-            message: Some(if ready { "SSH console target is available" } else { "runtime has no SSH console target" }.to_string()),
+            condition_type: "Available".to_string(),
+            status: ConditionStatus::Unknown,
+            reason: Some("Reconciling".to_string()),
+            message: Some("runtime reconciliation is in progress".to_string()),
             last_transition_at: now_rfc3339(),
         }],
         services: None,
@@ -237,10 +228,16 @@ mod tests {
         let plan = plan(&state);
 
         assert_eq!(plan.statuses.len(), 2);
-        assert!(matches!(plan.statuses[0].phase, Phase::Pending));
-        assert_eq!(plan.statuses[0].conditions[0].reason.as_deref(), Some("RuntimeNotReady"));
+        assert!(matches!(plan.statuses[0].phase, Phase::Progressing));
+        assert_eq!(
+            plan.statuses[0].conditions[0].reason.as_deref(),
+            Some("Reconciling")
+        );
         assert!(matches!(plan.statuses[1].phase, Phase::Pending));
-        assert_eq!(plan.statuses[1].conditions[0].reason.as_deref(), Some("Unsupported"));
+        assert_eq!(
+            plan.statuses[1].conditions[0].reason.as_deref(),
+            Some("Unsupported")
+        );
         assert_eq!(plan.event.generation, Some(3));
         assert!(plan.event.message.contains("1 runtime(s), 1 workload(s)"));
     }
