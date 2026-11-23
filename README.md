@@ -30,6 +30,22 @@ an exact release revision. The agent realizes a new generation before
 activation, restarts only the agent control plane, checks health and
 capabilities, and rolls back the profile on failure.
 
+The installed CLI uses the same service configuration and state locations as
+the systemd agent by default: `/etc/statix/agent.json` and
+`/var/lib/statix-agent`. It also provides service controls:
+
+```sh
+sudo statix-agent start
+sudo statix-agent status
+sudo statix-agent restart
+sudo statix-agent logs --follow
+sudo statix-agent stop
+```
+
+`statix-agent run` remains available for foreground diagnostics. Custom
+deployments can override the default paths with `STATIX_AGENT_CONFIG` and
+`STATIX_AGENT_STATE_DIR`.
+
 Inspect or operate updates with:
 
 ```bash
