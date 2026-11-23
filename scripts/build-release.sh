@@ -7,14 +7,6 @@ mode="${1:-all}"
 out="${OUTPUT_ROOT:-dist}/upload"
 mkdir -p "$out"
 
-if [[ -n "${GIT_TAG:-}" ]]; then
-  version="${GIT_TAG#v}"
-  commit="${GIT_SHA:-unknown}"
-  built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf '{\n  "version": "%s",\n  "commit": "%s",\n  "builtAt": "%s"\n}\n' \
-    "$version" "$commit" "$built_at" > version.json
-fi
-
 case "$mode" in
   all|binary)
     system="${NIX_SYSTEM:-x86_64-linux}"
