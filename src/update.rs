@@ -547,13 +547,32 @@ fn json_contains_package(value: &serde_json::Value, package: &str) -> bool {
             .iter()
             .any(|value| json_contains_package(value, package)),
         serde_json::Value::Object(values) => {
-            values.get("name").and_then(serde_json::Value::as_str) == Some(package)
+            values
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| name == package)
+                || values
+                    .get("attrPath")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|attr_path| attr_path.rsplit('.').next() == Some(package))
+                || ["originalUrl", "url"].iter().any(|key| {
+                    values
+                        .get(*key)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|url| flake_url_contains_package(url, package))
+                })
                 || values
                     .values()
                     .any(|value| json_contains_package(value, package))
         }
         _ => false,
     }
+}
+
+fn flake_url_contains_package(url: &str, package: &str) -> bool {
+    url.split_once('#')
+        .and_then(|(_, fragment)| fragment.rsplit('.').next())
+        == Some(package)
 }
 
 fn rollback_profile(profile: &str) -> Result<bool> {
@@ -696,5 +715,34 @@ mod tests {
         ]);
 
         assert!(!json_contains_package(&listing, PACKAGE));
+    }
+
+    #[test]
+    fn finds_runtime_package_in_realistic_nix_profile_json() {
+        let listing = serde_json::json!([
+            {
+                "attrPath": "packages.x86_64-linux.statix-agent-runtime",
+                "originalUrl": "github:StatixSolutions/statix-agent/b3e1fbca#packages.x86_64-linux.statix-agent-runtime",
+                "storePaths": ["/nix/store/example"]
+            }
+        ]);
+
+        assert!(json_contains_package(&listing, PACKAGE));
+    }
+
+    #[test]
+    fn flake_url_package_matching_requires_a_fragment() {
+        assert!(flake_url_contains_package(
+            "github:example/agent#packages.x86_64-linux.statix-agent-runtime",
+            PACKAGE
+        ));
+        assert!(!flake_url_contains_package(
+            "github:example/statix-agent-runtime",
+            PACKAGE
+        ));
+        assert!(!flake_url_contains_package(
+            "github:example/agent#packages.x86_64-linux.other",
+            PACKAGE
+        ));
     }
 }

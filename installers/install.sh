@@ -131,6 +131,7 @@ ReadWritePaths=$STATE_DIR
 WantedBy=multi-user.target
 EOF
   cat >/etc/sudoers.d/statix-agent <<EOF
+Defaults!$PROFILE/bin/statix-agent-lxc env_keep += "STATIX_AGENT_STATE_DIR STATE_DIRECTORY STATIX_LXC_NETWORK_BRIDGE STATIX_LXC_NETWORK_GATEWAY"
 Defaults!$PROFILE/bin/statix-agent-lxc secure_path="$PROFILE/bin:/usr/bin:/bin"
 $SERVICE_USER ALL=(root) NOPASSWD: $PROFILE/bin/statix-agent-lxc *
 $SERVICE_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start statix-agent-update.service
