@@ -49,7 +49,6 @@ impl LxcContainer {
 
     fn check_dependencies() -> Result<()> {
         let required_cmds = [
-            "sudo",
             "lxc-create",
             "lxc-start",
             "lxc-wait",
@@ -58,6 +57,10 @@ impl LxcContainer {
             "lxc-destroy",
         ];
         let mut missing = Vec::new();
+
+        if !Path::new(&sudo_path()).exists() {
+            missing.push("sudo");
+        }
 
         for cmd in required_cmds.iter() {
             if let Err(e) = StdCommand::new(cmd).arg("--version").output() {
@@ -735,7 +738,7 @@ fn redacted_command(command: &[String]) -> String {
 }
 
 fn lxc_command(program: &str) -> TokioCommand {
-    let mut command = TokioCommand::new("sudo");
+    let mut command = TokioCommand::new(sudo_path());
     command
         .arg("-n")
         .arg("--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY")
@@ -755,7 +758,7 @@ fn lxc_command(program: &str) -> TokioCommand {
 }
 
 fn lxc_std_command(program: &str) -> StdCommand {
-    let mut command = StdCommand::new("sudo");
+    let mut command = StdCommand::new(sudo_path());
     command
         .arg("-n")
         .arg("--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY")
@@ -818,7 +821,7 @@ pub(crate) fn runtime_command(program: &str, name: &str, args: &[String]) -> Vec
     let mut command = vec![
         "env".to_string(),
         format!("STATIX_AGENT_STATE_DIR={}", state_dir.display()),
-        "sudo".to_string(),
+        sudo_path(),
         "-n".to_string(),
         "--preserve-env=STATIX_AGENT_STATE_DIR,STATE_DIRECTORY".to_string(),
         lxc_helper_path().to_string(),
@@ -834,12 +837,26 @@ pub(crate) fn runtime_command(program: &str, name: &str, args: &[String]) -> Vec
 
 pub(crate) fn network_command() -> Vec<String> {
     vec![
-        "sudo".to_string(),
+        sudo_path(),
         "-n".to_string(),
         "--preserve-env=STATIX_LXC_NETWORK_BRIDGE,STATIX_LXC_NETWORK_GATEWAY".to_string(),
         lxc_helper_path().to_string(),
         "network-ensure".to_string(),
     ]
+}
+
+fn sudo_path() -> String {
+    if let Ok(path) = std::env::var("STATIX_SUDO_PATH") {
+        if !path.trim().is_empty() {
+            return path;
+        }
+    }
+    for path in ["/run/wrappers/bin/sudo", "/usr/bin/sudo"] {
+        if Path::new(path).exists() {
+            return path.to_owned();
+        }
+    }
+    "sudo".to_owned()
 }
 
 pub(crate) fn runtime_guest_network_command(name: &str) -> Option<Vec<String>> {
@@ -990,7 +1007,7 @@ mod tests {
 
         assert_eq!(command[0], "env");
         assert!(command[1].starts_with("STATIX_AGENT_STATE_DIR="));
-        assert_eq!(command[2], "sudo");
+        assert!(command[2] == "sudo" || command[2].ends_with("/sudo"));
         assert!(command[5].ends_with("/bin/statix-agent-lxc"));
         assert_eq!(command[6], "lxc-attach");
         assert!(
@@ -1006,7 +1023,7 @@ mod tests {
     #[test]
     fn network_command_uses_privileged_helper_without_runtime_arguments() {
         let command = super::network_command();
-        assert_eq!(command[0], "sudo");
+        assert!(command[0] == "sudo" || command[0].ends_with("/sudo"));
         assert_eq!(command[4], "network-ensure");
         assert_eq!(command.len(), 5);
     }
