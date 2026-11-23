@@ -17,6 +17,26 @@ fail() {
   exit 2
 }
 
+ensure_lxc_template_config() {
+  local compat_root="/run/current-system/sw/share/lxc/config"
+  [[ -f "$compat_root/common.conf" ]] && return
+
+  local lxc_create real_lxc package_root package_config
+  lxc_create="$(command -v lxc-create || true)"
+  [[ -n "$lxc_create" ]] || fail "lxc-create is required to locate the LXC template config"
+  real_lxc="$(readlink -f "$lxc_create" 2>/dev/null || true)"
+  [[ "$real_lxc" == */bin/* ]] || fail "could not resolve the LXC package path from $lxc_create"
+  package_root="${real_lxc%/bin/*}"
+  package_config="$package_root/share/lxc/config"
+  [[ -f "$package_config/common.conf" ]] || fail "LXC template config is missing: $package_config/common.conf"
+
+  if [[ -e "$compat_root" && ! -L "$compat_root" ]]; then
+    fail "LXC template config path exists but common.conf is missing: $compat_root/common.conf"
+  fi
+  install -d -m 0755 "${compat_root%/config}"
+  ln -sfn "$package_config" "$compat_root"
+}
+
 [[ $# -ge 1 ]] || fail "missing operation"
 operation="$1"
 shift
@@ -123,6 +143,7 @@ esac
 # creation, before starting the container; hand that one host-side file back to
 # the invoking service user while leaving the container rootfs privileged.
 if [[ "$operation" == lxc-create ]]; then
+  ensure_lxc_template_config
   if command -v "$operation" >/dev/null 2>&1 && "$operation" "$@"; then
     status=0
   else

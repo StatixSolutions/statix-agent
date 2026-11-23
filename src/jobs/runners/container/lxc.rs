@@ -37,6 +37,7 @@ use super::{
 pub(crate) struct LxcContainer {
     name: String,
     destroyed: bool,
+    warn_on_drop: bool,
 }
 
 impl LxcContainer {
@@ -44,6 +45,15 @@ impl LxcContainer {
         Self {
             name,
             destroyed: false,
+            warn_on_drop: true,
+        }
+    }
+
+    pub(crate) fn existing_persistent(name: String) -> Self {
+        Self {
+            name,
+            destroyed: false,
+            warn_on_drop: false,
         }
     }
 
@@ -145,6 +155,7 @@ impl LxcContainer {
         let container = Self {
             name,
             destroyed: false,
+            warn_on_drop: true,
         };
         container.apply_job_config(cpu, memory_mb, enforce_lxc_limits())?;
         if lxc_bridge_network().is_none() {
@@ -199,6 +210,22 @@ impl LxcContainer {
             );
         }
 
+        Ok(())
+    }
+
+    pub(crate) async fn ensure_network() -> Result<()> {
+        let command = network_command();
+        let (program, args) = command
+            .split_first()
+            .context("LXC network command is empty")?;
+        let status = TokioCommand::new(program)
+            .args(args)
+            .status()
+            .await
+            .context("failed to initialize the LXC host network")?;
+        if !status.success() {
+            bail!("LXC host network initialization failed with {status}");
+        }
         Ok(())
     }
 
@@ -709,7 +736,7 @@ fn shell_env_key(key: &str) -> String {
 
 impl Drop for LxcContainer {
     fn drop(&mut self) {
-        if !self.destroyed {
+        if self.warn_on_drop && !self.destroyed {
             warn!(container = %self.name, "lxc container was not destroyed before drop; cleanup may be needed");
         }
     }

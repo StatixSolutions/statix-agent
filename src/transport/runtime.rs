@@ -206,9 +206,13 @@ async fn reconcile_lxc(name: &str, runtime: &RuntimeSpec) -> Result<()> {
         bail!("memoryMb must be between 1 and {}", u32::MAX);
     }
 
+    if matches!(runtime.spec.power, PowerState::Running) {
+        LxcContainer::ensure_network().await?;
+    }
+
     let path = lxc::runtime_config_path(name);
     let mut container = if path.exists() {
-        LxcContainer::existing(name.to_owned())
+        LxcContainer::existing_persistent(name.to_owned())
     } else {
         lifecycle(
             &runtime.meta.id,
