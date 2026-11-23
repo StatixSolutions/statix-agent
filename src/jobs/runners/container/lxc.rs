@@ -519,12 +519,12 @@ impl LxcContainer {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
-    pub(crate) async fn destroy(&mut self) {
+    pub(crate) async fn destroy(&mut self) -> Result<()> {
         if self.destroyed {
-            return;
+            return Ok(());
         }
 
-        let _ = lxc_command("lxc-stop")
+        let stop_status = lxc_command("lxc-stop")
             .arg("-n")
             .arg(&self.name)
             .arg("-P")
@@ -532,14 +532,25 @@ impl LxcContainer {
             .arg("--kill")
             .status()
             .await;
-        let _ = lxc_command("lxc-destroy")
+        if let Ok(status) = &stop_status {
+            if !status.success() {
+                warn!(container = %self.name, status = %status, "lxc-stop during cleanup failed");
+            }
+        }
+        let destroy_status = lxc_command("lxc-destroy")
             .arg("-n")
             .arg(&self.name)
             .arg("-P")
             .arg(lxc_storage_path())
             .status()
             .await;
+        let destroy_status = destroy_status
+            .with_context(|| missing_dependency_message("lxc-destroy", "lxc"))?;
+        if !destroy_status.success() {
+            bail!("lxc-destroy failed for container {} with {destroy_status}", self.name);
+        }
         self.destroyed = true;
+        Ok(())
     }
 
     fn config_path(&self) -> PathBuf {

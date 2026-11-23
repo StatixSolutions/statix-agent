@@ -181,6 +181,33 @@ fn apply_desired(
     } = reconcile::plan(&state);
     let generation = state.generation;
     info!(generation, "received desired state:\n{block}");
+    for runtime in &state.runtimes {
+        let resource_id = runtime.meta.id.as_str();
+        let message = format!(
+            "generation={} project={} type={:?} image={} power={:?}",
+            generation,
+            runtime.meta.project_id,
+            runtime.spec.runtime_type,
+            runtime.spec.image,
+            runtime.spec.power,
+        );
+        let _ = logs::append_lifecycle(
+            "info", "runtime", Some(resource_id), None, None,
+            "reconcile_desired_state", "observed", None, &message,
+        );
+        let _ = logs::append_lifecycle(
+            "warn", "runtime", Some(resource_id), None, None,
+            "runtime_execution", "unsupported", None,
+            "desired-state runtime execution is not implemented in this build",
+        );
+    }
+    for workload in &state.workloads {
+        let _ = logs::append_lifecycle(
+            "warn", "workload", Some(workload.meta.id.as_str()), None, None,
+            "workload_execution", "unsupported", None,
+            "desired-state workload execution is not implemented in this build",
+        );
+    }
     for status in statuses {
         let _ = outbound_tx.send(OutboundMessage::Status(status));
     }

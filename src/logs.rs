@@ -83,6 +83,12 @@ pub struct Record {
     pub stream: Option<String>,
     pub level: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 fn directory() -> Result<PathBuf> {
@@ -141,6 +147,9 @@ pub fn append_job(
             "info".into()
         },
         message: redact(line),
+        step: None,
+        outcome: None,
+        duration_ms: None,
     };
     append(record)
 }
@@ -157,6 +166,37 @@ pub fn append_agent(level: &str, message: &str) -> Result<()> {
         stream: None,
         level: level.into(),
         message: redact(message),
+        step: None,
+        outcome: None,
+        duration_ms: None,
+    };
+    append(record)
+}
+
+pub fn append_lifecycle(
+    level: &str,
+    scope: &str,
+    resource_id: Option<&str>,
+    job_id: Option<&str>,
+    attempt_id: Option<&str>,
+    step: &str,
+    outcome: &str,
+    duration_ms: Option<u64>,
+    message: &str,
+) -> Result<()> {
+    let record = Record {
+        id: next_record_id(),
+        timestamp: now_ms(),
+        scope: scope.into(),
+        resource_id: resource_id.map(str::to_owned),
+        job_id: job_id.map(str::to_owned),
+        attempt_id: attempt_id.map(str::to_owned),
+        stream: None,
+        level: level.into(),
+        message: redact(message),
+        step: Some(step.into()),
+        outcome: Some(outcome.into()),
+        duration_ms,
     };
     append(record)
 }
@@ -353,6 +393,9 @@ mod tests {
             stream: None,
             level: "info".to_string(),
             message: message.to_string(),
+            step: None,
+            outcome: None,
+            duration_ms: None,
         }
     }
 
