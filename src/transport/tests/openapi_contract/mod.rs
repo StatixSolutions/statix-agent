@@ -162,6 +162,12 @@ const IMPLEMENTATIONS: &[Implementation] = &[
         implemented: true,
         tested: true,
     },
+    Implementation { kind: "console.open", direction: Direction::ServerToAgent, implemented: true, tested: true },
+    Implementation { kind: "console.opened", direction: Direction::AgentToServer, implemented: true, tested: true },
+    Implementation { kind: "console.data", direction: Direction::AgentToServer, implemented: true, tested: true },
+    Implementation { kind: "console.resize", direction: Direction::ServerToAgent, implemented: true, tested: true },
+    Implementation { kind: "console.close", direction: Direction::ServerToAgent, implemented: true, tested: true },
+    Implementation { kind: "console.error", direction: Direction::AgentToServer, implemented: true, tested: true },
 ];
 
 fn document() -> Value {

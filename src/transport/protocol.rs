@@ -46,6 +46,12 @@ pub const AGENT_TELEMETRY_FRAMES: &[&str] = &[
     "logs.query",
     "logs.result",
     "logs.capabilities",
+    "console.open",
+    "console.opened",
+    "console.data",
+    "console.resize",
+    "console.close",
+    "console.error",
 ];
 
 pub fn new_id() -> Id {
@@ -121,6 +127,10 @@ pub enum IncomingMessage {
     Ping,
     Desired(NodeDesiredState),
     LogQuery(LogQueryBody),
+    ConsoleOpen(ConsoleOpenBody),
+    ConsoleData(ConsoleDataBody),
+    ConsoleResize(ConsoleResizeBody),
+    ConsoleClose(ConsoleCloseBody),
     OpDispatch(OpDispatchBody),
     OpCancel(OpCancelBody),
     Unhandled(String),
@@ -190,6 +200,64 @@ pub struct LogResultBody {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleOpenBody {
+    pub session_id: Id,
+    pub runtime_id: Id,
+    #[serde(default = "default_console_cols")]
+    pub cols: u16,
+    #[serde(default = "default_console_rows")]
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleDataBody {
+    pub session_id: Id,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleResizeBody {
+    pub session_id: Id,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleCloseBody {
+    pub session_id: Id,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleOpenedBody {
+    pub session_id: Id,
+    pub runtime_id: Id,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleDataOutBody {
+    pub session_id: Id,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleErrorBody {
+    pub session_id: Id,
+    pub code: String,
+    pub message: String,
+}
+
+fn default_console_cols() -> u16 { 80 }
+fn default_console_rows() -> u16 { 24 }
+
 pub fn decode(raw: &str) -> Result<IncomingMessage, DecodeError> {
     let envelope: IncomingEnvelope =
         serde_json::from_str(raw).map_err(DecodeError::InvalidEnvelope)?;
@@ -214,6 +282,18 @@ pub fn decode(raw: &str) -> Result<IncomingMessage, DecodeError> {
             .map_err(body_error),
         "logs.query" => serde_json::from_value(envelope.body)
             .map(IncomingMessage::LogQuery)
+            .map_err(body_error),
+        "console.open" => serde_json::from_value(envelope.body)
+            .map(IncomingMessage::ConsoleOpen)
+            .map_err(body_error),
+        "console.data" => serde_json::from_value(envelope.body)
+            .map(IncomingMessage::ConsoleData)
+            .map_err(body_error),
+        "console.resize" => serde_json::from_value(envelope.body)
+            .map(IncomingMessage::ConsoleResize)
+            .map_err(body_error),
+        "console.close" => serde_json::from_value(envelope.body)
+            .map(IncomingMessage::ConsoleClose)
             .map_err(body_error),
         "op_dispatch" => Ok(serde_json::from_value(envelope.body)
             .map(IncomingMessage::OpDispatch)
@@ -332,7 +412,25 @@ pub struct RuntimeSpecBody {
     pub image: String,
     pub resources: Resources,
     pub power: PowerState,
+    #[serde(default)]
+    pub console: Option<ConsoleTarget>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleTarget {
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    #[serde(default = "default_ssh_user")]
+    pub user: String,
+    pub identity_file: String,
+    #[serde(default)]
+    pub known_hosts_file: Option<String>,
+}
+
+fn default_ssh_port() -> u16 { 22 }
+fn default_ssh_user() -> String { "statix".to_string() }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

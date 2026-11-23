@@ -6,14 +6,15 @@
 
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use std::{collections::HashMap, sync::{Arc, Mutex}};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command, sync::mpsc};
 use tracing::{info, warn};
 
 use crate::logs;
 use crate::update;
 
 use super::protocol::{
-    IncomingMessage, LogQueryBody, LogResultBody, NodeDesiredState, OpResultBody, OperationSpec,
+    ConsoleErrorBody, ConsoleOpenBody, ConsoleOpenedBody, IncomingMessage, LogQueryBody, LogResultBody, NodeDesiredState, OpResultBody, OperationSpec,
 };
 use super::reconcile::{self, ReconcilePlan};
 use super::session::OutboundMessage;
@@ -23,10 +24,18 @@ pub enum HandleOutcome {
     Reconnect { after: Option<Duration> },
 }
 
+#[derive(Clone, Default)]
+pub struct ConsoleManager {
+    sessions: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ConsoleCommand>>>>,
+}
+
+enum ConsoleCommand { Data(String), Resize(u16, u16), Close }
+
 pub fn handle(
     message: IncomingMessage,
     outbound_tx: &mpsc::UnboundedSender<OutboundMessage>,
     last_desired: &mut Option<NodeDesiredState>,
+    consoles: &ConsoleManager,
 ) -> HandleOutcome {
     match message {
         IncomingMessage::Ping => {
@@ -48,6 +57,28 @@ pub fn handle(
         }
         IncomingMessage::LogQuery(query) => {
             spawn_log_query(query, outbound_tx.clone());
+            HandleOutcome::Continue
+        }
+        IncomingMessage::ConsoleOpen(open) => {
+            open_console(open, outbound_tx.clone(), last_desired.as_ref(), consoles.clone());
+            HandleOutcome::Continue
+        }
+        IncomingMessage::ConsoleData(data) => {
+            if let Ok(sessions) = consoles.sessions.lock() {
+                if let Some(tx) = sessions.get(&data.session_id) { let _ = tx.send(ConsoleCommand::Data(data.data)); }
+            }
+            HandleOutcome::Continue
+        }
+        IncomingMessage::ConsoleResize(resize) => {
+            if let Ok(sessions) = consoles.sessions.lock() {
+                if let Some(tx) = sessions.get(&resize.session_id) { let _ = tx.send(ConsoleCommand::Resize(resize.cols, resize.rows)); }
+            }
+            HandleOutcome::Continue
+        }
+        IncomingMessage::ConsoleClose(close) => {
+            if let Ok(sessions) = consoles.sessions.lock() {
+                if let Some(tx) = sessions.get(&close.session_id) { let _ = tx.send(ConsoleCommand::Close); }
+            }
             HandleOutcome::Continue
         }
         IncomingMessage::OpDispatch(dispatch) => {
@@ -210,6 +241,74 @@ pub fn resync(state: &NodeDesiredState, outbound_tx: &mpsc::UnboundedSender<Outb
     }
 }
 
+fn open_console(
+    open: ConsoleOpenBody,
+    outbound_tx: mpsc::UnboundedSender<OutboundMessage>,
+    desired: Option<&NodeDesiredState>,
+    manager: ConsoleManager,
+) {
+    let target = desired
+        .and_then(|state| state.runtimes.iter().find(|runtime| runtime.meta.id == open.runtime_id))
+        .and_then(|runtime| runtime.spec.console.clone());
+    let Some(target) = target else {
+        let _ = outbound_tx.send(OutboundMessage::ConsoleError(ConsoleErrorBody {
+            session_id: open.session_id,
+            code: "runtime_not_ssh_ready".into(),
+            message: "runtime has no SSH console target".into(),
+        }));
+        return;
+    };
+
+    let session_id = open.session_id.clone();
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+    if let Ok(mut sessions) = manager.sessions.lock() {
+        if sessions.contains_key(&session_id) {
+            let _ = outbound_tx.send(OutboundMessage::ConsoleError(ConsoleErrorBody { session_id, code: "session_exists".into(), message: "console session already exists".into() }));
+            return;
+        }
+        sessions.insert(session_id.clone(), command_tx);
+    }
+
+    tokio::spawn(async move {
+        let mut command = Command::new("ssh");
+        command.arg("-tt").arg("-o").arg("BatchMode=yes").arg("-o").arg("StrictHostKeyChecking=yes")
+            .arg("-i").arg(&target.identity_file);
+        if let Some(known_hosts) = &target.known_hosts_file { command.arg("-o").arg(format!("UserKnownHostsFile={known_hosts}")); }
+        command.arg("-p").arg(target.port.to_string()).arg(format!("{}@{}", target.user, target.host))
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+        let Ok(mut child) = command.spawn() else {
+            let _ = outbound_tx.send(OutboundMessage::ConsoleError(ConsoleErrorBody { session_id: session_id.clone(), code: "ssh_start_failed".into(), message: "failed to start ssh client".into() }));
+            if let Ok(mut sessions) = manager.sessions.lock() { sessions.remove(&session_id); }
+            return;
+        };
+        let mut stdin = child.stdin.take().expect("console stdin configured");
+        let mut stdout = child.stdout.take().expect("console stdout configured");
+        let _ = outbound_tx.send(OutboundMessage::ConsoleOpened(ConsoleOpenedBody { session_id: session_id.clone(), runtime_id: open.runtime_id }));
+        let read_tx = outbound_tx.clone();
+        let read_session = session_id.clone();
+        let reader = tokio::spawn(async move {
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match stdout.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => { let _ = read_tx.send(OutboundMessage::ConsoleData(crate::transport::protocol::ConsoleDataOutBody { session_id: read_session.clone(), data: String::from_utf8_lossy(&buf[..n]).into_owned() })); }
+                }
+            }
+        });
+        while let Some(input) = command_rx.recv().await {
+            match input {
+                ConsoleCommand::Data(data) => { if stdin.write_all(data.as_bytes()).await.is_err() { break; } }
+                ConsoleCommand::Resize(cols, rows) => { let _ = (cols, rows); /* ssh -tt has no portable resize API; future PTY backend will apply it. */ }
+                ConsoleCommand::Close => { let _ = child.kill().await; break; }
+            }
+        }
+        let _ = child.kill().await;
+        let _ = reader.await;
+        if let Ok(mut sessions) = manager.sessions.lock() { sessions.remove(&session_id); }
+        let _ = outbound_tx.send(OutboundMessage::ConsoleClose(crate::transport::protocol::ConsoleCloseBody { session_id, reason: Some("ssh session closed".into()) }));
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,7 +328,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut last_desired = None;
 
-        let outcome = handle(IncomingMessage::Ping, &tx, &mut last_desired);
+        let outcome = handle(IncomingMessage::Ping, &tx, &mut last_desired, &ConsoleManager::default());
 
         assert!(matches!(outcome, HandleOutcome::Continue));
         assert!(matches!(rx.try_recv().unwrap(), OutboundMessage::Pong));
@@ -246,6 +345,7 @@ mod tests {
             }),
             &tx,
             &mut last_desired,
+            &ConsoleManager::default(),
         );
 
         match outcome {
@@ -265,6 +365,7 @@ mod tests {
             IncomingMessage::Desired(empty_state()),
             &tx,
             &mut last_desired,
+            &ConsoleManager::default(),
         );
 
         assert!(matches!(outcome, HandleOutcome::Continue));
@@ -282,7 +383,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = handle(query, &tx, &mut last_desired);
+        let outcome = handle(query, &tx, &mut last_desired, &ConsoleManager::default());
 
         assert!(matches!(outcome, HandleOutcome::Continue));
         // The query runs on a spawned blocking task; an error querying the

@@ -57,6 +57,7 @@
         });
 
       nixosModules.statix-agent = import ./nix/module.nix;
+      nixosModules.statix-guest = import ./nix/guest.nix;
       nixosModules.default = self.nixosModules.statix-agent;
     };
 }
