@@ -23,6 +23,10 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::wireguard::ensure_applied as ensure_wireguard_applied;
 
+const AGENT_SERVICE: &str = "statix-agent.service";
+const SERVICE_CONFIG_PATH: &str = "/etc/statix/agent.json";
+const SERVICE_STATE_PATH: &str = "/var/lib/statix-agent";
+
 #[derive(Debug, Parser)]
 #[command(name = "statix-agent", args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -37,12 +41,25 @@ enum Command {
     Run(RunArgs),
     Login(LoginArgs),
     Update,
+    Start,
+    Stop,
+    Restart,
+    Status,
+    Logs(LogsArgs),
     #[command(name = "update-worker", hide = true)]
     UpdateWorker,
 }
 
 #[derive(Debug, Args, Default)]
 struct RunArgs {}
+
+#[derive(Debug, Args)]
+struct LogsArgs {
+    #[arg(long, default_value_t = 100)]
+    lines: u32,
+    #[arg(long, short)]
+    follow: bool,
+}
 
 #[derive(Debug, Args)]
 struct LoginArgs {
@@ -104,11 +121,17 @@ async fn dispatch(cli: Cli) -> Result<()> {
         None => run_agent(RunArgs::default()).await,
         Some(Command::Run(args)) => run_agent(args).await,
         Some(Command::Login(args)) => {
+            use_service_environment();
             let options = args.into_options();
             let login_config = resolve_login_config(options.api_base_url.clone());
             run_login(login_config, options).await
         }
         Some(Command::Update) => request_update().await,
+        Some(Command::Start) => service_action("start").await,
+        Some(Command::Stop) => service_action("stop").await,
+        Some(Command::Restart) => service_action("restart").await,
+        Some(Command::Status) => service_status().await,
+        Some(Command::Logs(args)) => service_logs(args).await,
         Some(Command::UpdateWorker) => update::run_worker().await,
     }
 }
@@ -127,6 +150,7 @@ pub(crate) fn format_error_chain(error: &anyhow::Error) -> String {
 }
 
 async fn run_agent(_args: RunArgs) -> Result<()> {
+    use_service_environment();
     let config = AgentConfig::load()?.context(
         "Agent identity not configured. Run `statix-agent login --api-base-url http://host:3001` with STATIX_AGENT_CONFIG pointing at the service config, or set NODE_ID/NODE_TOKEN in the environment.",
     )?;
@@ -156,6 +180,104 @@ async fn run_agent(_args: RunArgs) -> Result<()> {
 
     info!("agent stopped");
     Ok(())
+}
+
+/// Make foreground commands use the same persistent identity and state as the
+/// installed system service. Explicit environment overrides remain useful for
+/// custom deployments and tests.
+fn use_service_environment() {
+    if std::env::var_os("STATIX_AGENT_CONFIG").is_none() {
+        // This is called before spawning any worker threads and establishes
+        // the same defaults as the systemd unit for foreground CLI commands.
+        unsafe { std::env::set_var("STATIX_AGENT_CONFIG", SERVICE_CONFIG_PATH) };
+    }
+    if std::env::var_os("STATIX_AGENT_STATE_DIR").is_none() {
+        unsafe { std::env::set_var("STATIX_AGENT_STATE_DIR", SERVICE_STATE_PATH) };
+    }
+}
+
+async fn service_action(action: &str) -> Result<()> {
+    run_service_command("systemctl", &[action, AGENT_SERVICE], false).await
+}
+
+async fn service_status() -> Result<()> {
+    run_service_command("systemctl", &["status", "--no-pager", AGENT_SERVICE], false).await
+}
+
+async fn service_logs(args: LogsArgs) -> Result<()> {
+    let lines = args.lines.to_string();
+    let mut journal_args = vec!["--unit", AGENT_SERVICE, "--no-pager", "--lines", &lines];
+    if args.follow {
+        journal_args.push("--follow");
+    }
+
+    if args.follow {
+        run_service_command("journalctl", &journal_args, true).await
+    } else {
+        run_service_command("journalctl", &journal_args, false).await
+    }
+}
+
+async fn run_service_command(program: &str, args: &[&str], inherit_stdio: bool) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (program, args, inherit_stdio);
+        bail!("system service commands are supported on Linux only");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let status = if inherit_stdio {
+            TokioCommand::new(program).args(args).status().await
+        } else {
+            let output = TokioCommand::new(program).args(args).output().await?;
+            print_command_output(&output);
+            Ok(output.status)
+        };
+
+        match status {
+            Ok(status) if status.success() => Ok(()),
+            Ok(_status) => {
+                let fallback = TokioCommand::new("sudo")
+                    .args(["-n", program])
+                    .args(args)
+                    .status()
+                    .await
+                    .context("failed to run service command through sudo")?;
+                if fallback.success() {
+                    Ok(())
+                } else {
+                    bail!("{program} {} failed with {fallback}", args.join(" "))
+                }
+            }
+            Err(error) => {
+                let fallback = TokioCommand::new("sudo")
+                    .args(["-n", program])
+                    .args(args)
+                    .status()
+                    .await
+                    .with_context(|| format!("failed to run {program}: {error}"))?;
+                if fallback.success() {
+                    Ok(())
+                } else {
+                    bail!("sudo {program} {} failed with {fallback}", args.join(" "))
+                }
+            }
+        }
+    }
+}
+
+fn print_command_output(output: &std::process::Output) {
+    use std::io::Write;
+
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    let _ = stdout.write_all(&output.stdout);
+    let _ = stdout.flush();
+    let stderr = std::io::stderr();
+    let mut stderr = stderr.lock();
+    let _ = stderr.write_all(&output.stderr);
+    let _ = stderr.flush();
 }
 
 async fn shutdown_signal_task(stop_tx: watch::Sender<bool>) {
@@ -416,6 +538,31 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::Update)
+        ));
+    }
+
+    #[test]
+    fn cli_parses_service_commands() {
+        assert!(matches!(
+            Cli::try_parse_from(["statix-agent", "start"])
+                .unwrap()
+                .command,
+            Some(Command::Start)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["statix-agent", "status"])
+                .unwrap()
+                .command,
+            Some(Command::Status)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["statix-agent", "logs", "--follow", "--lines", "25"])
+                .unwrap()
+                .command,
+            Some(Command::Logs(LogsArgs {
+                lines: 25,
+                follow: true
+            }))
         ));
     }
 
