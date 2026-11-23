@@ -274,7 +274,7 @@ async fn lxc_8080_ok_is_reachable_from_host() {
     container.stop().await.unwrap();
     assert!(http_get(addr).is_err(), "{addr} still answers after stop");
 
-    container.destroy().await;
+    container.destroy().await.unwrap();
     assert!(!state.join("lxc/containers").join(&name).exists());
     let _ = fs::remove_dir_all(workdir);
     let _ = fs::remove_dir_all(state);
@@ -350,7 +350,7 @@ async fn lxc_lifecycle_create_start_stop_start_destroy() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "marker");
 
-    container.destroy().await;
+    container.destroy().await.unwrap();
     assert!(!rootfs.exists());
     assert!(container.state().await.is_err());
     let _ = fs::remove_dir_all(state);
