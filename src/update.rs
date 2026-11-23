@@ -11,16 +11,18 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 
 use crate::config::agent_state_dir;
-use crate::transport::protocol::{now_rfc3339, Id, OpResultBody, UpdateAgentSpec};
+use crate::transport::protocol::{Id, OpResultBody, UpdateAgentSpec, now_rfc3339};
 
 const PACKAGE: &str = "statix-agent-runtime";
 const NIX_FEATURES: [&str; 2] = ["--extra-experimental-features", "nix-command flakes"];
+const LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/StatixSolutions/statix-agent/releases/latest";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,175 +208,291 @@ pub fn cancel(op_id: &str) -> Result<OpResultBody> {
     }
 }
 
-pub fn run_worker() -> Result<()> {
+pub async fn run_worker() -> Result<()> {
+    let mut processed_queued_operation = false;
     loop {
-        let mut operation = {
-            let _lock = operation_lock()?;
-            let entries = fs::read_dir(operations_dir()?)?;
-            let mut candidate = None;
-            for entry in entries {
-                let path = entry?.path();
-                if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                    continue;
-                }
-                let bytes = match fs::read(&path) {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        tracing::warn!(?error, path = %path.display(), "skipping unreadable update state");
-                        continue;
-                    }
-                };
-                let operation: UpdateOperation = match serde_json::from_slice(&bytes) {
-                    Ok(operation) => operation,
-                    Err(error) => {
-                        tracing::warn!(?error, path = %path.display(), "skipping invalid update state");
-                        continue;
-                    }
-                };
-                if operation.status == "accepted" {
-                    candidate = Some(operation);
-                    break;
-                }
-            }
-            let mut operation = match candidate {
-                Some(operation) => operation,
-                None => return Ok(()),
-            };
-            operation.status = "running".to_owned();
-            operation.updated_at = now_rfc3339();
-            write_operation(&operation)?;
-            operation
-        };
+        if let Some(operation) = take_next_operation()? {
+            processed_queued_operation = true;
+            let target = operation_target(&operation);
+            run_target(Some(operation), target).await?;
+            continue;
+        }
+        if processed_queued_operation {
+            return Ok(());
+        }
 
-        let target = &operation.target;
-        let reference = flake_reference(&target.flake_ref, &target.revision);
-        let ready_before = readiness_stamp();
-        let profile = profile();
-        if lease_expired(&operation.lease_expires_at) {
-            let result = OpResultBody {
-                op_id: operation.op_id.clone(),
+        let target = resolve_latest_target().await?;
+        tracing::info!(revision = %target.revision, "no queued update operation; using latest GitHub release");
+        return run_target(None, target).await;
+    }
+}
+
+fn take_next_operation() -> Result<Option<UpdateOperation>> {
+    let _lock = operation_lock()?;
+    let entries = fs::read_dir(operations_dir()?)?;
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(?error, path = %path.display(), "skipping unreadable update state");
+                continue;
+            }
+        };
+        let mut operation: UpdateOperation = match serde_json::from_slice(&bytes) {
+            Ok(operation) => operation,
+            Err(error) => {
+                tracing::warn!(?error, path = %path.display(), "skipping invalid update state");
+                continue;
+            }
+        };
+        if operation.status != "accepted" {
+            continue;
+        }
+        operation.status = "running".to_owned();
+        operation.updated_at = now_rfc3339();
+        write_operation(&operation)?;
+        return Ok(Some(operation));
+    }
+    Ok(None)
+}
+
+fn operation_target(operation: &UpdateOperation) -> UpdateAgentSpec {
+    operation.target.clone()
+}
+
+#[derive(Debug, Deserialize)]
+struct LatestRelease {
+    tag_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitReference {
+    sha: String,
+}
+
+async fn resolve_latest_target() -> Result<UpdateAgentSpec> {
+    tracing::info!(url = LATEST_RELEASE_API, "resolving latest GitHub release");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent(format!(
+            "statix-agent/{}",
+            crate::system_info::agent_version()
+        ))
+        .build()
+        .context("failed to configure GitHub release client")?;
+    let release: LatestRelease = client
+        .get(LATEST_RELEASE_API)
+        .send()
+        .await
+        .context("failed to query latest GitHub release")?
+        .error_for_status()
+        .context("GitHub latest release request failed")?
+        .json()
+        .await
+        .context("failed to decode GitHub latest release")?;
+    let tag = release.tag_name.trim();
+    if tag.is_empty() {
+        bail!("GitHub latest release did not contain a tag");
+    }
+    let commit: CommitReference = client
+        .get(format!(
+            "https://api.github.com/repos/StatixSolutions/statix-agent/commits/{}",
+            tag
+        ))
+        .send()
+        .await
+        .with_context(|| format!("failed to resolve GitHub release tag {tag}"))?
+        .error_for_status()
+        .with_context(|| format!("GitHub release tag {tag} could not be resolved"))?
+        .json()
+        .await
+        .with_context(|| format!("failed to decode commit for GitHub release tag {tag}"))?;
+    if commit.sha.trim().is_empty() {
+        bail!("GitHub release tag {tag} resolved to an empty commit");
+    }
+    tracing::info!(tag, revision = %commit.sha, "resolved latest GitHub release");
+    Ok(UpdateAgentSpec {
+        flake_ref: "github:StatixSolutions/statix-agent".to_owned(),
+        revision: commit.sha,
+    })
+}
+
+async fn run_target(mut operation: Option<UpdateOperation>, target: UpdateAgentSpec) -> Result<()> {
+    let operation_id = operation
+        .as_ref()
+        .map(|value| value.op_id.clone())
+        .unwrap_or_else(|| "manual".to_owned());
+    let reference = flake_reference(&target.flake_ref, &target.revision);
+    let ready_before = readiness_stamp();
+    let profile = profile();
+    tracing::info!(operation_id = %operation_id, revision = %target.revision, reference = %reference, "starting agent update");
+
+    if operation
+        .as_ref()
+        .is_some_and(|value| lease_expired(&value.lease_expires_at))
+    {
+        let op_id = operation.as_ref().unwrap().op_id.clone();
+        return finish_operation(
+            &mut operation,
+            OpResultBody {
+                op_id,
                 status: "failed".to_owned(),
                 reason: Some("lease_expired".to_owned()),
                 message: Some("update lease expired before realization".to_owned()),
-            };
-            set_result(&mut operation, &result)?;
-            return Ok(());
-        }
-        let mut nix_args = vec![
+            },
+        );
+    }
+
+    tracing::info!("realizing agent profile generation");
+    let install = Command::new("nix")
+        .env("PATH", nix_path())
+        .args([
             NIX_FEATURES[0],
             NIX_FEATURES[1],
             "profile",
             "install",
             "--profile",
             profile.as_str(),
-        ];
-        nix_args.push(&reference);
-        let install = Command::new("nix")
-            .env("PATH", nix_path())
-            .args(nix_args)
-            .output()
-            .context("failed to execute nix profile install")?;
-        if !install.status.success() {
-            let result = OpResultBody {
-                op_id: operation.op_id.clone(),
+            &reference,
+        ])
+        .status()
+        .context("failed to execute nix profile install")?;
+    if !install.success() {
+        tracing::error!("agent profile realization failed");
+        return finish_operation(
+            &mut operation,
+            OpResultBody {
+                op_id: operation_id.clone(),
                 status: "failed".to_owned(),
                 reason: Some("realization_failed".to_owned()),
-                message: Some(String::from_utf8_lossy(&install.stderr).trim().to_owned()),
-            };
-            set_result(&mut operation, &result)?;
-            return Ok(());
-        }
+                message: Some("nix profile install failed; see updater journal".to_owned()),
+            },
+        );
+    }
+    tracing::info!("agent profile generation realized");
 
-        if lease_expired(&operation.lease_expires_at) {
-            let rollback = Command::new("nix")
-                .env("PATH", nix_path())
-                .args([
-                    NIX_FEATURES[0],
-                    NIX_FEATURES[1],
-                    "profile",
-                    "rollback",
-                    "--profile",
-                    profile.as_str(),
-                ])
-                .status()
-                .context("failed to execute nix profile rollback")?;
-            let result = OpResultBody {
-                op_id: operation.op_id.clone(),
+    if operation
+        .as_ref()
+        .is_some_and(|value| lease_expired(&value.lease_expires_at))
+    {
+        tracing::warn!("update lease expired before activation; rolling back");
+        let rollback = rollback_profile(&profile)?;
+        let op_id = operation.as_ref().unwrap().op_id.clone();
+        return finish_operation(
+            &mut operation,
+            OpResultBody {
+                op_id,
                 status: "failed".to_owned(),
                 reason: Some(
-                    if rollback.success() {
+                    if rollback {
                         "lease_expired"
                     } else {
                         "rollback_failed"
                     }
                     .to_owned(),
                 ),
-                message: Some(if rollback.success() {
+                message: Some(if rollback {
                     "update lease expired before activation; new generation was rolled back"
                         .to_owned()
                 } else {
                     "update lease expired and rollback could not be confirmed".to_owned()
                 }),
-            };
-            set_result(&mut operation, &result)?;
-            return Ok(());
-        }
+            },
+        );
+    }
 
-        let restart = Command::new("systemctl")
+    tracing::info!("restarting agent control plane");
+    let restart = Command::new("systemctl")
+        .args(["restart", "statix-agent.service"])
+        .status()
+        .context("failed to restart statix-agent.service")?;
+    let active = Command::new("systemctl")
+        .args(["is-active", "--quiet", "statix-agent.service"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    let ready = wait_for_readiness(ready_before, Duration::from_secs(30));
+    tracing::info!(
+        restart = restart.success(),
+        active,
+        ready,
+        "agent health check completed"
+    );
+    if !restart.success() || !active || !ready {
+        tracing::warn!("agent health check failed; rolling back profile");
+        let rollback = rollback_profile(&profile)?;
+        let restore = Command::new("systemctl")
             .args(["restart", "statix-agent.service"])
             .status()
-            .context("failed to restart statix-agent.service")?;
-        let active = Command::new("systemctl")
-            .args(["is-active", "--quiet", "statix-agent.service"])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        let ready = wait_for_readiness(ready_before, Duration::from_secs(30));
-        if !restart.success() || !active || !ready {
-            let rollback = Command::new("nix")
-                .env("PATH", nix_path())
-                .args([
-                    NIX_FEATURES[0],
-                    NIX_FEATURES[1],
-                    "profile",
-                    "rollback",
-                    "--profile",
-                    profile.as_str(),
-                ])
-                .status()
-                .context("failed to execute nix profile rollback")?;
-            let restore = Command::new("systemctl")
-                .args(["restart", "statix-agent.service"])
-                .status()
-                .context("failed to restart statix-agent.service after rollback")?;
-            let result = OpResultBody {
-                op_id: operation.op_id.clone(),
+            .context("failed to restart statix-agent.service after rollback")?;
+        let rollback_confirmed = rollback && restore.success();
+        tracing::info!(rollback, restore = restore.success(), "rollback completed");
+        return finish_operation(
+            &mut operation,
+            OpResultBody {
+                op_id: operation_id.clone(),
                 status: "failed".to_owned(),
                 reason: Some(
-                    if !rollback.success() || !restore.success() {
-                        "rollback_failed"
-                    } else {
+                    if rollback_confirmed {
                         "health_check_failed"
+                    } else {
+                        "rollback_failed"
                     }
                     .to_owned(),
                 ),
-                message: Some(if rollback.success() && restore.success() {
+                message: Some(if rollback_confirmed {
                     "new generation was rolled back".to_owned()
                 } else {
                     "update failed and rollback could not be confirmed".to_owned()
                 }),
-            };
-            set_result(&mut operation, &result)?;
-            return Ok(());
-        }
+            },
+        );
+    }
 
-        let result = OpResultBody {
-            op_id: operation.op_id.clone(),
+    tracing::info!(revision = %target.revision, "agent update succeeded");
+    finish_operation(
+        &mut operation,
+        OpResultBody {
+            op_id: operation_id.clone(),
             status: "succeeded".to_owned(),
             reason: None,
             message: Some(format!("activated revision {}", target.revision)),
-        };
-        set_result(&mut operation, &result)?;
+        },
+    )
+}
+
+fn rollback_profile(profile: &str) -> Result<bool> {
+    Ok(Command::new("nix")
+        .env("PATH", nix_path())
+        .args([
+            NIX_FEATURES[0],
+            NIX_FEATURES[1],
+            "profile",
+            "rollback",
+            "--profile",
+            profile,
+        ])
+        .status()
+        .context("failed to execute nix profile rollback")?
+        .success())
+}
+
+fn finish_operation(operation: &mut Option<UpdateOperation>, result: OpResultBody) -> Result<()> {
+    if let Some(operation) = operation {
+        set_result(operation, &result)?;
+        Ok(())
+    } else if result.status == "succeeded" {
+        Ok(())
+    } else {
+        bail!(
+            result
+                .message
+                .unwrap_or_else(|| "manual update failed".to_owned())
+        )
     }
 }
 

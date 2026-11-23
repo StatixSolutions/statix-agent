@@ -133,15 +133,18 @@ RUST_LOG=debug statix-agent run
 journalctl -u statix-agent --no-pager -n 100
 ```
 
-To manually run the installed updater, use:
+To manually update a standalone-bootstrap host to the latest published GitHub
+release, use:
 
 ```sh
 statix-agent update
 ```
 
-The command starts `statix-agent-update.service`, waits for the oneshot to
-finish, and follows its journal output. It is available on Linux installations
-that include the updater service (such as the Ubuntu and Arch installers).
+The command resolves the latest release to its immutable commit, starts
+`statix-agent-update.service`, waits for the oneshot to finish, and follows its
+journal output. It requires access to GitHub release metadata and the Nix
+binary cache. Orchestration-issued updates continue to use the exact revision
+provided by the `update_agent` operation.
 
 Job stdout and stderr are retained in the agent-owned spool described below;
 they are not forwarded to or archived by the server. Agent diagnostics are
