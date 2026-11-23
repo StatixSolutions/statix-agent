@@ -48,6 +48,12 @@ paths:
           - $ref: '#/components/schemas/LogsQueryMessage'
           - $ref: '#/components/schemas/LogsResultMessage'
           - $ref: '#/components/schemas/LogsCapabilitiesMessage'
+          - $ref: '#/components/schemas/ConsoleOpenMessage'
+          - $ref: '#/components/schemas/ConsoleOpenedMessage'
+          - $ref: '#/components/schemas/ConsoleDataMessage'
+          - $ref: '#/components/schemas/ConsoleResizeMessage'
+          - $ref: '#/components/schemas/ConsoleCloseMessage'
+          - $ref: '#/components/schemas/ConsoleErrorMessage'
         lifecycle:
           - agent -> server: hello
           - server -> agent: challenge
@@ -150,6 +156,30 @@ components:
       name: logs.capabilities
       payload:
         $ref: '#/components/schemas/LogsCapabilitiesMessage'
+    ConsoleOpen:
+      name: console.open
+      payload:
+        $ref: '#/components/schemas/ConsoleOpenMessage'
+    ConsoleOpened:
+      name: console.opened
+      payload:
+        $ref: '#/components/schemas/ConsoleOpenedMessage'
+    ConsoleData:
+      name: console.data
+      payload:
+        $ref: '#/components/schemas/ConsoleDataMessage'
+    ConsoleResize:
+      name: console.resize
+      payload:
+        $ref: '#/components/schemas/ConsoleResizeMessage'
+    ConsoleClose:
+      name: console.close
+      payload:
+        $ref: '#/components/schemas/ConsoleCloseMessage'
+    ConsoleError:
+      name: console.error
+      payload:
+        $ref: '#/components/schemas/ConsoleErrorMessage'
   schemas:
     Id:
       type: string
@@ -300,6 +330,36 @@ components:
         - $ref: '#/components/schemas/Envelope'
         - type: object
           properties: { type: { const: logs.capabilities }, body: { $ref: '#/components/schemas/LogsCapabilitiesBody' } }
+    ConsoleOpenMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: console.open }, body: { $ref: '#/components/schemas/ConsoleOpenBody' } }
+    ConsoleOpenedMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: console.opened }, body: { $ref: '#/components/schemas/ConsoleOpenedBody' } }
+    ConsoleDataMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: console.data }, body: { $ref: '#/components/schemas/ConsoleDataBody' } }
+    ConsoleResizeMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: console.resize }, body: { $ref: '#/components/schemas/ConsoleResizeBody' } }
+    ConsoleCloseMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: console.close }, body: { $ref: '#/components/schemas/ConsoleCloseBody' } }
+    ConsoleErrorMessage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties: { type: { const: console.error }, body: { $ref: '#/components/schemas/ConsoleErrorBody' } }
     AuthBody:
       type: object
       required: [nodeId, signature]
@@ -370,6 +430,7 @@ components:
             image: { type: string, minLength: 1 }
             resources: { $ref: '#/components/schemas/Resources' }
             power: { type: string, enum: [running, stopped] }
+            console: { $ref: '#/components/schemas/ConsoleTarget' }
     WorkloadSpec:
       type: object
       required: [apiVersion, kind, meta, spec]
@@ -554,6 +615,34 @@ components:
     LogsCapabilitiesBody:
       type: object
       additionalProperties: true
+    ConsoleOpenBody:
+      type: object
+      required: [sessionId, runtimeId]
+      properties: { sessionId: { $ref: '#/components/schemas/Id' }, runtimeId: { $ref: '#/components/schemas/Id' }, cols: { type: integer, minimum: 1 }, rows: { type: integer, minimum: 1 } }
+    ConsoleOpenedBody:
+      type: object
+      required: [sessionId, runtimeId]
+      properties: { sessionId: { $ref: '#/components/schemas/Id' }, runtimeId: { $ref: '#/components/schemas/Id' } }
+    ConsoleDataBody:
+      type: object
+      required: [sessionId, data]
+      properties: { sessionId: { $ref: '#/components/schemas/Id' }, data: { type: string } }
+    ConsoleResizeBody:
+      type: object
+      required: [sessionId, cols, rows]
+      properties: { sessionId: { $ref: '#/components/schemas/Id' }, cols: { type: integer, minimum: 1 }, rows: { type: integer, minimum: 1 } }
+    ConsoleCloseBody:
+      type: object
+      required: [sessionId]
+      properties: { sessionId: { $ref: '#/components/schemas/Id' }, reason: { type: string } }
+    ConsoleErrorBody:
+      type: object
+      required: [sessionId, code, message]
+      properties: { sessionId: { $ref: '#/components/schemas/Id' }, code: { type: string }, message: { type: string } }
+    ConsoleTarget:
+      type: object
+      required: [host, identityFile]
+      properties: { host: { type: string }, port: { type: integer, minimum: 1, maximum: 65535 }, user: { type: string }, identityFile: { type: string }, knownHostsFile: { type: string } }
     MessageBodies:
       oneOf:
         - { $ref: '#/components/schemas/HelloBody' }
@@ -573,3 +662,9 @@ components:
         - { $ref: '#/components/schemas/LogsQueryBody' }
         - { $ref: '#/components/schemas/LogsResultBody' }
         - { $ref: '#/components/schemas/LogsCapabilitiesBody' }
+        - { $ref: '#/components/schemas/ConsoleOpenBody' }
+        - { $ref: '#/components/schemas/ConsoleOpenedBody' }
+        - { $ref: '#/components/schemas/ConsoleDataBody' }
+        - { $ref: '#/components/schemas/ConsoleResizeBody' }
+        - { $ref: '#/components/schemas/ConsoleCloseBody' }
+        - { $ref: '#/components/schemas/ConsoleErrorBody' }

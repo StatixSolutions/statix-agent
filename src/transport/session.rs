@@ -43,6 +43,10 @@ pub enum OutboundMessage {
     LogResult(protocol::LogResultBody),
     LogCapabilities,
     OpResult(protocol::OpResultBody),
+    ConsoleOpened(protocol::ConsoleOpenedBody),
+    ConsoleData(protocol::ConsoleDataOutBody),
+    ConsoleError(protocol::ConsoleErrorBody),
+    ConsoleClose(protocol::ConsoleCloseBody),
 }
 
 /// Runs the reconnect loop until `stop_rx` signals shutdown.
@@ -113,7 +117,7 @@ async fn run_once(
             protocol: vec![2],
             agent_version: crate::system_info::agent_version(),
             boot_id: boot_id.to_string(),
-            capabilities: Vec::new(), // honest: no execution capability yet
+            capabilities: vec!["console.pty.v1".to_string()],
             observed: Default::default(), // no local desired-state store yet
             pending_op_results: pending_ids,
         },
@@ -186,6 +190,10 @@ async fn run_once(
                     protocol::encode("logs.capabilities", serde_json::json!({}))
                 }
                 OutboundMessage::OpResult(result) => protocol::encode("op_result", result),
+                OutboundMessage::ConsoleOpened(body) => protocol::encode("console.opened", body),
+                OutboundMessage::ConsoleData(body) => protocol::encode("console.data", body),
+                OutboundMessage::ConsoleError(body) => protocol::encode("console.error", body),
+                OutboundMessage::ConsoleClose(body) => protocol::encode("console.close", body),
             };
             if ws_write.send(Message::Text(payload.into())).await.is_err() {
                 warn!("outbound v2 message send failed");
@@ -199,6 +207,7 @@ async fn run_once(
     }
 
     let mut last_desired: Option<NodeDesiredState> = None;
+    let console_manager = dispatch::ConsoleManager::default();
     let mut resync_tick = interval(Duration::from_secs(u64::from(welcome.resync_sec)));
     resync_tick.tick().await; // first tick fires immediately; consume it
 
@@ -232,7 +241,7 @@ async fn run_once(
             incoming = ws_read.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
                     match protocol::decode(&text) {
-                        Ok(message) => match dispatch::handle(message, &outbound_tx, &mut last_desired) {
+                        Ok(message) => match dispatch::handle(message, &outbound_tx, &mut last_desired, &console_manager) {
                             HandleOutcome::Continue => {}
                             HandleOutcome::Reconnect { after } => {
                                 return Ok(SessionOutcome::Reconnect { after });

@@ -30,12 +30,7 @@ pub fn plan(state: &NodeDesiredState) -> ReconcilePlan {
     let mut lines = Vec::new();
 
     for runtime in &state.runtimes {
-        statuses.push(pending_status(
-            ObjectKind::Runtime,
-            &runtime.meta.id,
-            &runtime.meta.node_id,
-            runtime.meta.generation,
-        ));
+        statuses.push(runtime_status(runtime));
         lines.push(describe_runtime(runtime));
     }
     for workload in &state.workloads {
@@ -90,6 +85,28 @@ fn pending_status(kind: ObjectKind, id: &str, node_id: &str, generation: u64) ->
             status: ConditionStatus::False,
             reason: Some("Unsupported".to_string()),
             message: Some(UNSUPPORTED_MESSAGE.to_string()),
+            last_transition_at: now_rfc3339(),
+        }],
+        services: None,
+        last_error: None,
+        reported_at: now_rfc3339(),
+    }
+}
+
+fn runtime_status(runtime: &RuntimeSpec) -> ObjectStatus {
+    let ready = matches!(runtime.spec.power, super::protocol::PowerState::Running)
+        && runtime.spec.console.is_some();
+    ObjectStatus {
+        id: runtime.meta.id.clone(),
+        kind: ObjectKind::Runtime,
+        node_id: runtime.meta.node_id.clone(),
+        observed_generation: runtime.meta.generation,
+        phase: if ready { Phase::Ready } else { Phase::Pending },
+        conditions: vec![Condition {
+            condition_type: "SSHConsole".to_string(),
+            status: if ready { ConditionStatus::True } else { ConditionStatus::False },
+            reason: Some(if ready { "Available" } else { "RuntimeNotReady" }.to_string()),
+            message: Some(if ready { "SSH console target is available" } else { "runtime has no SSH console target" }.to_string()),
             last_transition_at: now_rfc3339(),
         }],
         services: None,
@@ -159,6 +176,7 @@ mod tests {
                     gpu: None,
                 },
                 power: PowerState::Running,
+                console: None,
             },
         }
     }
@@ -208,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_one_status_per_object_all_pending_and_unsupported() {
+    fn plans_runtime_ssh_status_and_rejects_workloads() {
         let state = NodeDesiredState {
             node_id: "n1".to_string(),
             generation: 3,
@@ -219,11 +237,10 @@ mod tests {
         let plan = plan(&state);
 
         assert_eq!(plan.statuses.len(), 2);
-        for status in &plan.statuses {
-            assert!(matches!(status.phase, Phase::Pending));
-            assert_eq!(status.conditions.len(), 1);
-            assert_eq!(status.conditions[0].reason.as_deref(), Some("Unsupported"));
-        }
+        assert!(matches!(plan.statuses[0].phase, Phase::Pending));
+        assert_eq!(plan.statuses[0].conditions[0].reason.as_deref(), Some("RuntimeNotReady"));
+        assert!(matches!(plan.statuses[1].phase, Phase::Pending));
+        assert_eq!(plan.statuses[1].conditions[0].reason.as_deref(), Some("Unsupported"));
         assert_eq!(plan.event.generation, Some(3));
         assert!(plan.event.message.contains("1 runtime(s), 1 workload(s)"));
     }
