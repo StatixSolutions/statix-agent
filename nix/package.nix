@@ -5,9 +5,20 @@
   openssl,
 }:
 
+let
+  sourceMetadata = builtins.fromJSON (builtins.readFile ../version.json);
+  requestedVersion = builtins.getEnv "STATIX_AGENT_RELEASE_VERSION";
+  requestedCommit = builtins.getEnv "STATIX_AGENT_RELEASE_COMMIT";
+  version = if requestedVersion != "" then requestedVersion else sourceMetadata.version;
+  commit = if requestedCommit != "" then requestedCommit else sourceMetadata.commit;
+  builtAt = sourceMetadata.builtAt;
+  metadata = builtins.toJSON {
+    inherit version commit builtAt;
+  };
+in
 rustPlatform.buildRustPackage {
   pname = "statix-agent";
-  version = (builtins.fromJSON (builtins.readFile ../version.json)).version;
+  inherit version;
 
   src = lib.cleanSourceWith {
     src = ./..;
@@ -30,7 +41,7 @@ rustPlatform.buildRustPackage {
   ];
 
   postInstall = ''
-    install -Dm0644 version.json $out/bin/version.json
+    install -Dm0644 <(printf '%s' '${metadata}') $out/bin/version.json
     install -Dm0755 installers/common/statix-agent-capabilities.sh \
       $out/bin/statix-agent-capabilities
     install -Dm0755 installers/common/statix-agent-lxc-helper \

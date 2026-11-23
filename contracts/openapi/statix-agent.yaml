@@ -580,6 +580,7 @@ components:
         kind: { const: update_agent }
         flakeRef: { type: string, minLength: 1 }
         revision: { type: string, minLength: 1 }
+        version: { type: string, minLength: 1 }
     OpDispatchBody:
       type: object
       required: [opId, spec, leaseExpiresAt]

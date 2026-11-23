@@ -318,6 +318,7 @@ async fn resolve_latest_target() -> Result<UpdateAgentSpec> {
     Ok(UpdateAgentSpec {
         flake_ref: "github:StatixSolutions/statix-agent".to_owned(),
         revision: commit.sha,
+        version: Some(tag.strip_prefix('v').unwrap_or(tag).to_owned()),
     })
 }
 
@@ -348,7 +349,12 @@ async fn run_target(mut operation: Option<UpdateOperation>, target: UpdateAgentS
     }
 
     tracing::info!("realizing agent profile generation");
-    if !replace_profile_generation(&profile, &reference)? {
+    if !replace_profile_generation(
+        &profile,
+        &reference,
+        target.version.as_deref(),
+        &target.revision,
+    )? {
         tracing::error!("agent profile realization failed");
         return finish_operation(
             &mut operation,
@@ -452,7 +458,12 @@ async fn run_target(mut operation: Option<UpdateOperation>, target: UpdateAgentS
     )
 }
 
-fn replace_profile_generation(profile: &str, reference: &str) -> Result<bool> {
+fn replace_profile_generation(
+    profile: &str,
+    reference: &str,
+    release_version: Option<&str>,
+    revision: &str,
+) -> Result<bool> {
     let had_existing_runtime = profile_contains_package(profile, PACKAGE)?;
     if had_existing_runtime {
         let removed = Command::new("nix")
@@ -473,17 +484,24 @@ fn replace_profile_generation(profile: &str, reference: &str) -> Result<bool> {
         }
     }
 
-    let installed = Command::new("nix")
+    let mut install_command = Command::new("nix");
+    install_command
         .env("PATH", nix_path())
         .args([
             NIX_FEATURES[0],
             NIX_FEATURES[1],
             "profile",
             "install",
+            "--impure",
             "--profile",
             profile,
             reference,
         ])
+        .env("STATIX_AGENT_RELEASE_COMMIT", revision);
+    if let Some(version) = release_version.filter(|version| !version.trim().is_empty()) {
+        install_command.env("STATIX_AGENT_RELEASE_VERSION", version);
+    }
+    let installed = install_command
         .status()
         .context("failed to execute nix profile install")?;
     if installed.success() {
@@ -644,6 +662,7 @@ mod tests {
             UpdateAgentSpec {
                 flake_ref: "github:example/agent".to_owned(),
                 revision: String::new(),
+                version: None,
             },
             "2099-01-01T00:00:00Z".to_owned(),
         );

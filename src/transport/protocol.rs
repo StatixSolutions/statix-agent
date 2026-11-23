@@ -148,6 +148,8 @@ pub enum OperationSpec {
 pub struct UpdateAgentSpec {
     pub flake_ref: String,
     pub revision: String,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
